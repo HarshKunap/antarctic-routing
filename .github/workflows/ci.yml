@@ -30,3 +30,23 @@ jobs:
         run: |
           antroute validate-config
           antroute demo --departure 2026-12-20 --resolution-km 25 --scenarios 80 --out artifacts/ci-demo
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t antarctic-routing:ci .
+      - name: Smoke-test container
+        run: |
+          docker run -d --name antroute -p 8000:8000 antarctic-routing:ci
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8000/health; then break; fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:8000/health | grep -q '"status":"ok"'
+          curl -fsS http://127.0.0.1:8000/ | grep -q "Antarctic Ice-Risk Routing"
+          curl -fsS -X POST "http://127.0.0.1:8000/routes?wait=true" -H 'Content-Type: application/json' \
+            -d '{"departure":"2027-01-10","scenarios":80,"resolution_km":25,"scenario_routes":0}' | grep -q '"status":"done"'
+          docker logs antroute | tail -20

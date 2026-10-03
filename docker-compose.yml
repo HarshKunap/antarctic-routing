@@ -1,0 +1,15 @@
+services:
+  antroute:
+    build: .
+    image: antarctic-routing:latest
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data          # downloaded and harmonised data
+      - ./models:/app/models      # trained checkpoints
+      - ./reports:/app/reports    # CLI reports
+    environment:
+      # Copernicus credentials for ingestion (never commit them):
+      # CDSAPI_URL, CDSAPI_KEY, COPERNICUSMARINE_SERVICE_USERNAME, COPERNICUSMARINE_SERVICE_PASSWORD
+      - ANTROUTE_CONFIG=/app/config/config.yaml
+    restart: unless-stopped

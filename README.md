@@ -4,6 +4,18 @@
 
 > ⚠️ **Research and decision-support prototype - not a certified navigation system.** Antarctic operations require authoritative ice information, vessel-specific operating limits, applicable ice-class guidance and qualified human oversight. All results shown below use **controlled-synthetic** data and are labelled as such in every output.
 
+### 🏁 Headline result (controlled-synthetic backtest, 20 voyages, 5 held-out seasons)
+
+| | Voyages meeting observed hazardous ice | Hours in hazardous ice | Start → arrival |
+|---|---|---|---|
+| Naive (leave now, shortest route) | **45%** | 4.0 h | 1.6 d |
+| Fixed 50 km ice-edge buffer | 0% | 0 h | 12.8 d |
+| **This system** | **0%** | **0 h** | **8.3 d** |
+
+It is as safe as the conservative buffer rule and finishes voyages **4.5 days sooner**. Its predicted risk at departure (mean P(breach) 0.3%, 95% upper bound 3.7%) is consistent with the realised 0 of 20 breaches.
+
+![Dashboard](docs/images/dashboard_plan.png)
+
 ---
 
 ## ✨ What makes it different
@@ -82,7 +94,37 @@ On this synthetic history the U-Net keeps significant skill through day 14, so t
 | Naive (leave day 1, shortest route) | 15 Nov | 38.6 h | 921 | **3** |
 | **This system** | 25 Nov (advice evolved daily) | 37.1 h | **838** | **0** |
 
-One replay on synthetic data is a demonstration, not evidence. Phase 4 repeats it across seasons and start dates. It also measures the cost of caution: in another replay, the planner waited two days when leaving on day 1 would also have been safe.
+One replay on synthetic data is a demonstration, not evidence. Phase 4 repeats it across seasons and start dates and measures the cost of caution as well as the safety gained.
+
+---
+
+## 🧪 Phase 4 results: validation and product (controlled-synthetic)
+
+**Replay backtest.** 5 held-out seasons × 4 start dates (15 Nov, 25 Nov, 5 Dec, 15 Dec). Each voyage is replayed three ways and sailed through the **observed** ice:
+
+![Backtest](docs/images/backtest.png)
+
+| Method | n | Breach rate | Hazard hours | Days waited | Start → arrival | Fuel index |
+|---|---|---|---|---|---|---|
+| Naive: leave on the start date, shortest route | 20 | 45% | 4.0 | 0.0 | 38.7 h | 911 |
+| Ice-edge buffer: first day a route keeps 50 km from observed ice, no replanning | 20 | 0% | 0.0 | 11.2 | 307 h | 838 |
+| **This system** | 20 | **0%** | **0.0** | **6.7** | **198 h** | **839** |
+
+The planner's mean predicted P(breach) at departure was 0.3% (95% upper bound 3.7%), against a realised 0/20. Twenty voyages cannot confirm calibration at the 5% level; they show the estimates are not optimistic.
+
+**Fuel/speed sensitivity.** The 20 Dec recommendation is unchanged across all 28 (λ, k) settings, because the route is in open water. Unit tests confirm the analysis *does* flag a change when a route crosses costly sub-limit ice.
+
+![Sensitivity](docs/images/sensitivity.png)
+
+**Product.**
+- **FastAPI backend:** jobs for long runs, voyage replan/history/export, 422/409/400 errors with reasons.
+- **Web dashboard:** no external dependencies, light/dark, phone-width. Verified in Chromium with Playwright: every tab exercised, no console errors.
+- **PDF voyage brief:** [example](docs/voyage_brief_example.pdf).
+- **Docker image:** built and smoke-tested in CI.
+
+| Departure window | Voyage replanning + audit log |
+|---|---|
+| ![Window](docs/images/dashboard_window.png) | ![Voyage](docs/images/dashboard_voyage.png) |
 
 ---
 
@@ -116,10 +158,38 @@ antroute fetch-sea-ice --start 2024-11-01 --end 2025-02-28
 antroute build-dataset --inputs "data/raw/sea_ice/**/*.nc" --out data/processed/sea_ice.nc
 antroute train-forecast --data data/processed/sea_ice.nc --n-val 1 --n-test 1
 
+# Phase 4: validation and product
+antroute backtest $S --weights models/unet14/best.pt --window-days 7 --members 120
+antroute sensitivity --departure 2026-12-17
+antroute brief --departure 2026-12-24 --out reports/voyage_brief.pdf
+pip install -e ".[api]" && antroute serve        # dashboard: http://127.0.0.1:8000  API docs: /docs
+
 python -m pytest                                 # full test suite
 ```
 
 `antroute demo` writes `plan.json` (all candidates + explanation), `route_map.png`, `recommended_route.geojson` / `.csv` (with disclaimer, issue time, config SHA-256) and a provenance `stage-result.json`.
+
+### 🐳 Docker
+
+```bash
+docker compose up --build        # dashboard + API on http://localhost:8000
+```
+
+`data/`, `models/` and `reports/` are mounted as volumes. Pass Copernicus credentials as environment variables; never commit them.
+
+### 🧰 Command reference
+
+| Command | Stage | Purpose |
+|---|---|---|
+| `validate-config` | 1 | Validate the scenario and Wilson scenario-count guard |
+| `fetch-sea-ice`, `build-dataset` | 2-3 | Download OSI SAF and harmonise it onto EPSG:3031 |
+| `demo`, `departures` | 6-8 | Route plan / departure sweep (synthetic world, `--iceberg`) |
+| `train-forecast`, `evaluate-forecast`, `calibrate-forecast` | 4 | U-Net, per-lead skill vs baselines, calibrated probabilities |
+| `trust-horizon` | 8 | Season-blocked bootstrap trust horizon |
+| `plan-window` | 8 | Departure window from one forecast issue |
+| `replay` | 9 | Day-by-day voyage replay with replanning and audit log |
+| `backtest`, `sensitivity` | 10 | Multi-season backtest vs baselines; fuel/speed sensitivity |
+| `brief`, `serve` | 11 | PDF voyage brief; API + dashboard |
 
 ---
 
@@ -151,8 +221,8 @@ flowchart LR
 | 7 Route optimisation | ✅ Time-dependent A*, candidates, risk-budgeted selection | `routing/` |
 | 8 Departure planner | ✅ Forecast-driven joint scenarios, climatology-anomaly scenarios beyond the horizon, trust horizon, window from one issue with support/trust flags | `forecasting/scenarios.py`, `forecasting/trust.py`, `routing/departure.py` |
 | 9 Replanning | ✅ Triggers, hysteresis, corridor alerts, stale-input flag, JSONL audit log, day-by-day replay | `routing/replan.py`, `replay.py` |
-| 10 Validation | ✅ MAE/RMSE/IIEE/Brier/reliability, single-voyage replay vs naive · ⏳ multi-season replay backtest | `validation/`, `replay.py` |
-| 11 Product | ✅ CLI, GeoJSON/CSV, figures · ⏳ FastAPI, dashboard | `cli.py`, `export.py`, `viz.py` |
+| 10 Validation | ✅ MAE/RMSE/IIEE/Brier/reliability, multi-season replay backtest vs naive and ice-edge buffer, fuel/speed sensitivity | `validation/`, `replay.py` |
+| 11 Product | ✅ CLI, FastAPI with jobs, web dashboard, GeoJSON/CSV, PDF voyage brief, Docker | `cli.py`, `api/`, `dashboard/`, `brief.py`, `Dockerfile` |
 
 ---
 
@@ -188,6 +258,11 @@ src/antarctic_routing/
   forecasting/trust.py      Stage 8 - trust horizon (season-blocked bootstrap)
   routing/replan.py         Stage 9 - replanning triggers, hysteresis, audit log
   replay.py                 Stage 9/10 - day-by-day historical replay scored against observed ice
+  validation/backtest.py    Stage 10 - multi-season replay backtest vs naive and ice-edge-buffer baselines
+  validation/sensitivity.py Stage 10 - fuel/speed assumption sensitivity
+  api/main.py               Stage 11 - FastAPI backend (jobs, voyages, figures)
+  dashboard/                Stage 11 - self-contained web dashboard
+  brief.py                  Stage 11 - PDF voyage brief
   synthetic.py              controlled-synthetic joint scenarios (schematic world)
   routing/                  Stages 6-8 - hazard, fuel, graph, A*, evaluation, candidates, departures
   validation/metrics.py     Stage 10 - MAE, RMSE, Brier, reliability
@@ -215,7 +290,8 @@ tests/                      hand-calculated values, behavioural routing worlds, 
 1. **Phase 1 ✅** config, ingestion framework, harmonisation, baselines, hazard/fuel, router, departure sweep, exports.
 2. **Phase 2 ✅** OSI SAF reader, residual U-Net vs baselines per lead, calibrated probabilities, iceberg drift ensembles in route risk. *Pending:* first run on real OSI SAF/ERA5/CMEMS data.
 3. **Phase 3 ✅** U-Net ensembles drive the router, climatology-anomaly scenarios beyond the horizon, trust horizon (season-blocked bootstrap), departure window from one forecast issue, replanning with an audit log, day-by-day replay.
-4. **Phase 4:** historical replay backtests vs shortest-path and fixed ice-edge-buffer baselines, fuel-sensitivity analysis, FastAPI + polar web map (OpenLayers, EPSG:3031), Docker.
+4. **Phase 4 ✅** replay backtest vs naive and ice-edge-buffer baselines, fuel/speed sensitivity, FastAPI, web dashboard, PDF brief, Docker.
+5. **Next (needs internet access):** run the full pipeline on real OSI SAF + ERA5 + CMEMS data; re-measure skill, trust horizon and backtest on real seasons; replace placeholder vessel limits with verified values; add PostGIS persistence for multi-user voyages.
 
 ## 📚 Related work
 
