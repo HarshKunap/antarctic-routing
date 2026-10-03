@@ -123,3 +123,25 @@ def test_demo_reads_latest_usnic_positions(tmp_path):
     assert rc == 0
     plan = json.loads((tmp_path / "o" / "plan.json").read_text())
     assert plan["icebergs"] == [{"id": "A23A", "lat": -60.5, "lon": -62.0}]
+
+
+def test_trust_horizon_from_evaluation_report(tmp_path):
+    seasons = {str(s): None for s in (2021, 2022, 2023, 2024, 2025)}
+    report = {
+        "methods": ["unet", "persistence", "climatology", "damped_persistence"], "leads": [1, 2, 3],
+        "execution_mode": "controlled_synthetic",
+        "by_season": {
+            "unet": {s: [0.010, 0.015, 0.030] for s in seasons},
+            "persistence": {s: [0.012, 0.020, 0.028] for s in seasons},
+            "damped_persistence": {s: [0.011, 0.018, 0.027] for s in seasons},
+            "climatology": {s: [0.030, 0.030, 0.030] for s in seasons},
+        },
+    }
+    path = tmp_path / "eval.json"
+    path.write_text(json.dumps(report))
+    assert main(["trust-horizon", "--report", str(path), "--out", str(tmp_path / "t")]) == 0
+    th = json.loads((tmp_path / "t" / "trust_horizon.json").read_text())
+    assert th["by_baseline"]["damped_persistence"]["trust_horizon_days"] == 2
+    assert th["by_baseline"]["climatology"]["trust_horizon_days"] == 2
+    assert th["trust_horizon_days"] == 2
+    assert (tmp_path / "t" / "trust_horizon.png").is_file()

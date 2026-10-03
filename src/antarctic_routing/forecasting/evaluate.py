@@ -77,6 +77,7 @@ def evaluate_forecasts(
     H = lead_days
     sums = {m: np.zeros((3, H)) for m in methods}  # abs, sq, count
     iiee = {m: np.zeros(H) for m in methods}
+    per_season = {m: {s: np.zeros((2, H)) for s in sorted(wanted)} for m in methods}  # abs, count
 
     for b in range(0, len(idx), batch_size):
         batch = idx[b: b + batch_size]
@@ -84,6 +85,7 @@ def evaluate_forecasts(
         model_pred = np.asarray(predictor(inputs, batch), float)
         for j, t in enumerate(batch):
             c_t = obs_all[t]
+            season = season_of(days[t], season_months)
             for h in range(1, H + 1):
                 obs = obs_all[t + h]
                 target_day = days[t] + timedelta(days=h)
@@ -99,6 +101,8 @@ def evaluate_forecasts(
                     sums[m][0, h - 1] += np.abs(err).sum()
                     sums[m][1, h - 1] += (err**2).sum()
                     sums[m][2, h - 1] += valid.sum()
+                    per_season[m][season][0, h - 1] += np.abs(err).sum()
+                    per_season[m][season][1, h - 1] += valid.sum()
                     disagree = valid & ((np.nan_to_num(p) >= edge_threshold) != (np.nan_to_num(obs) >= edge_threshold))
                     iiee[m][h - 1] += area[disagree].sum()
 
@@ -112,6 +116,8 @@ def evaluate_forecasts(
         "rmse": rmse,
         "iiee_km2": {m: (iiee[m] / n).tolist() for m in methods},
         "skill_mae_vs": {b: (np.array(mae[b]) - np.array(mae[model_name])).tolist() for b in BASELINES},
+        "by_season": {m: {s: (v[0] / np.maximum(v[1], 1)).tolist() for s, v in per_season[m].items()}
+                      for m in methods},
         "rho": rho,
         "n_samples": n,
         "train_seasons": sorted(train_seasons),

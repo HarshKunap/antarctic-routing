@@ -334,6 +334,36 @@ def cmd_calibrate_forecast(args) -> int:
     return 0
 
 
+def cmd_trust_horizon(args) -> int:
+    import json
+
+    from antarctic_routing.forecasting.trust import trust_horizon
+    from antarctic_routing.viz import plot_trust_horizon
+
+    report = json.loads(Path(args.report).read_text())
+    if "by_season" not in report:
+        raise SystemExit("report has no per-season errors; re-run evaluate-forecast")
+    model = report["methods"][0]
+    by_baseline = {b: trust_horizon(report["by_season"], model, b, n_boot=args.n_boot, alpha=args.alpha,
+                                    min_delta=args.min_delta, seed=args.seed) for b in args.baselines}
+    first = next(iter(by_baseline.values()))
+    result = {
+        "model": model, "trust_horizon_days": min(t["trust_horizon_days"] for t in by_baseline.values()),
+        "rule": "minimum over baselines of the last lead with every lower bound above min_delta",
+        "by_baseline": by_baseline, "leads": first["leads"], "min_delta": args.min_delta, "alpha": args.alpha,
+        "n_seasons": first["n_seasons"], "method": first["method"],
+        "execution_mode": report.get("execution_mode", "real"), "source_report": str(args.report),
+    }
+    out = Path(args.out)
+    write_json_artifact(out / "trust_horizon.json", result)
+    plot_trust_horizon(result, out / "trust_horizon.png", "Forecast trust horizon")
+    for b, t in by_baseline.items():
+        print(f"  vs {b:20s} trust horizon {t['trust_horizon_days']} d"
+              f"{' (limited by evaluated leads)' if t['limited_by_max_lead'] else ''}")
+    print(f"Trust horizon: {result['trust_horizon_days']} day(s)")
+    return 0
+
+
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="antroute", description=__doc__.splitlines()[0])
     p.add_argument("--version", action="version", version=f"antarctic-routing {__version__}")
@@ -412,6 +442,16 @@ def _parser() -> argparse.ArgumentParser:
     cf.add_argument("--members", type=int, default=20)
     cf.add_argument("--out", default="reports/calibration")
     cf.set_defaults(func=cmd_calibrate_forecast)
+
+    th = sub.add_parser("trust-horizon", help="season-blocked bootstrap trust horizon from an evaluation report")
+    th.add_argument("--report", default="reports/forecast/forecast_eval.json")
+    th.add_argument("--baselines", nargs="+", default=["damped_persistence", "climatology"])
+    th.add_argument("--min-delta", type=float, default=0.0)
+    th.add_argument("--alpha", type=float, default=0.05)
+    th.add_argument("--n-boot", type=int, default=2000)
+    th.add_argument("--seed", type=int, default=0)
+    th.add_argument("--out", default="reports/trust")
+    th.set_defaults(func=cmd_trust_horizon)
     return p
 
 

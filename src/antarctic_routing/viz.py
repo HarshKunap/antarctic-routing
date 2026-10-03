@@ -218,3 +218,32 @@ def plot_reliability(report: dict, path: str | Path, title: str) -> Path:
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
     return out
+
+
+def plot_trust_horizon(result: dict, path: str | Path, title: str) -> Path:
+    """Delta(h) = E_baseline - E_model with bootstrap bands and the trust-horizon marker."""
+    fig, ax = plt.subplots(figsize=(8.5, 4.2), dpi=130)
+    colours = {"damped_persistence": "#4f86c6", "climatology": "#c27c2c", "persistence": "#8a8f98"}
+    for name, th in result["by_baseline"].items():
+        c = colours.get(name, "#555")
+        ax.fill_between(th["leads"], th["ci_low"], th["ci_high"], color=c, alpha=0.18)
+        ax.plot(th["leads"], th["delta"], "o-", color=c, ms=4,
+                label=f"vs {name}: trust horizon {th['trust_horizon_days']} d")
+    ax.axhline(result["min_delta"], color="black", lw=0.8, ls="--", label="required improvement")
+    h = result["trust_horizon_days"]
+    if h:
+        ax.axvspan(0.5, h + 0.5, color="#3a8f6b", alpha=0.08)
+        ax.text(h + 0.45, ax.get_ylim()[1] * 0.92, f"trusted up to {h} d", ha="right", color="#3a8f6b", fontsize=9)
+    ax.set_xlabel("lead time (days)")
+    ax.set_ylabel("MAE improvement over baseline")
+    ax.set_xticks(result["leads"])
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8, loc="lower left")
+    ax.set_title(f"{title}\n{result['execution_mode'].upper()} - {result['method']}, "
+                 f"{result['n_seasons']} seasons, {int(100 * (1 - result['alpha']))}% lower bound", fontsize=9)
+    fig.tight_layout()
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+    return out
