@@ -55,8 +55,23 @@ def _setup(args):
     return cfg, grid, n_scen, o, d
 
 
-def _plan_dict(plan, world) -> dict:
+def _parse_bergs(args) -> list[tuple[str, float, float]]:
+    """--iceberg ID:LAT:LON entries plus the latest position per berg from a USNIC list."""
+    bergs: dict[str, tuple[str, float, float]] = {}
+    if getattr(args, "icebergs", None):
+        from antarctic_routing.ingestion.icebergs import read_iceberg_positions
+
+        for row in sorted(read_iceberg_positions(args.icebergs), key=lambda r: r["date"]):
+            bergs[row["iceberg_id"]] = (row["iceberg_id"], row["lat"], row["lon"])
+    for spec in getattr(args, "iceberg", None) or []:
+        bid, lat, lon = spec.split(":")
+        bergs[bid.upper()] = (bid.upper(), float(lat), float(lon))
+    return list(bergs.values())
+
+
+def _plan_dict(plan, world, bergs=()) -> dict:
     return {
+        "icebergs": [{"id": b[0], "lat": b[1], "lon": b[2]} for b in bergs],
         "status": plan.status,
         "explanation": plan.explanation,
         "risk_budget": plan.risk_budget,
@@ -100,6 +115,14 @@ def cmd_demo(args) -> int:
     cfg, grid, n_scen, o, d = _setup(args)
     dep = args.departure or cfg.route.departure_start
     world = generate_synthetic(cfg, grid, dep, _horizon_days(cfg), n_scen, seed=args.seed)
+    bergs = _parse_bergs(args)
+    if bergs:
+        import numpy as np
+
+        from antarctic_routing.iceberg.drift import add_iceberg_hazard
+
+        world = add_iceberg_hazard(world, bergs, rng=np.random.default_rng(args.seed),
+                                   radius_m=args.berg_radius_km * 1e3)
     vessel = VesselModel.from_config(cfg)
     plan = plan_candidates(
         world, vessel, o, d, cfg.routing.risk_budget, cfg.routing.risk_weights,
@@ -107,7 +130,7 @@ def cmd_demo(args) -> int:
         cfg.routing.confidence, args.seed,
     )
     out = Path(args.out)
-    outputs = [write_json_artifact(out / "plan.json", _plan_dict(plan, world))]
+    outputs = [write_json_artifact(out / "plan.json", _plan_dict(plan, world, bergs))]
     outputs.append(plot_plan(world, plan, vessel.tau, out / "route_map.png",
                              f"Antarctic route plan - departure {dep.isoformat()} ({n_scen} joint scenarios)"))
     cfg_sha = sha256_file(Path(args.config))
@@ -331,6 +354,9 @@ def _parser() -> argparse.ArgumentParser:
     dm = sub.add_parser("demo", help="plan routes for one departure")
     common(dm, "artifacts/demo")
     dm.add_argument("--departure", type=date.fromisoformat, default=None)
+    dm.add_argument("--iceberg", action="append", metavar="ID:LAT:LON", help="tracked iceberg (repeatable)")
+    dm.add_argument("--icebergs", default=None, help="USNIC iceberg list CSV (latest position per berg)")
+    dm.add_argument("--berg-radius-km", type=float, default=10.0, help="safety radius around each berg")
     dm.set_defaults(func=cmd_demo)
 
     dp = sub.add_parser("departures", help="sweep a departure window")

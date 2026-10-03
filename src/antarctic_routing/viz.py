@@ -69,6 +69,14 @@ def plot_plan(world: ScenarioSet, plan: PlanResult, tau: float, path: str | Path
     ax.pcolormesh(XE, YE, np.ma.masked_where(~world.land, world.land.astype(float)),
                   cmap=ListedColormap(["#d9d2c3"]), zorder=2)
     _graticule(ax, grid, rot)
+    if world.berg is not None:
+        XC, YC = rot(*np.meshgrid(grid.x, grid.y))
+        p_berg = world.berg[:, t_idx].mean(axis=0)
+        if p_berg.max() > 0:
+            ax.contourf(XC, YC, p_berg, levels=[0.05, 0.25, 0.5, 1.01], colors=["#c9b3e6", "#9b72cf", "#5e3c99"],
+                        alpha=0.75, zorder=2.5)
+            ax.contour(XC, YC, p_berg, levels=[0.05], colors=["#5e3c99"], linewidths=0.8, zorder=2.6)
+            ax.plot([], [], color="#9b72cf", lw=6, label="iceberg presence P >= 5/25/50%")
 
     def xy(cells):
         r = np.array([c[0] for c in cells])

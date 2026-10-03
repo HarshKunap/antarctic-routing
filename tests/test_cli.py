@@ -102,3 +102,24 @@ def test_calibrate_forecast_writes_report_calibrator_and_reliability_plot(tmp_pa
     assert report["val_seasons"] == [2014] and report["test_seasons"] == [2015]
     assert json.loads((tmp_path / "cal" / "calibrator.json").read_text())["leads"] == [1, 2, 3]
     assert (tmp_path / "cal" / "reliability.png").is_file()
+
+
+def test_demo_with_iceberg_records_it_in_plan(tmp_path):
+    rc = main(["demo", "--config", CONFIG, "--departure", "2027-01-10", "--out", str(tmp_path), *FAST,
+               "--iceberg", "A23A:-60.0:-63.0"])
+    assert rc == 0
+    plan = json.loads((tmp_path / "plan.json").read_text())
+    assert plan["icebergs"] == [{"id": "A23A", "lat": -60.0, "lon": -63.0}]
+    assert "iceberg" in plan["data_description"].lower()
+
+
+def test_demo_reads_latest_usnic_positions(tmp_path):
+    csv_path = tmp_path / "usnic.csv"
+    csv_path.write_text("Iceberg,Length (NM),Width (NM),Latitude,Longitude,Updated\n"
+                        "A23A,38,32,60 0S,63 0W,12/01/2026\n"
+                        "A23A,38,32,60 30S,62 0W,12/08/2026\n")
+    rc = main(["demo", "--config", CONFIG, "--departure", "2027-01-10", "--out", str(tmp_path / "o"), *FAST,
+               "--icebergs", str(csv_path)])
+    assert rc == 0
+    plan = json.loads((tmp_path / "o" / "plan.json").read_text())
+    assert plan["icebergs"] == [{"id": "A23A", "lat": -60.5, "lon": -62.0}]
