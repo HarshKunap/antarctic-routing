@@ -8,8 +8,10 @@ best route satisfies the risk budget:
     R*_d = argmin_R E[F_R | d]   s.t.   P(B_R | d) <= r_max
 
 Selection rule (declared in advance): minimum expected fuel among feasible
-dates; ties broken by expected voyage time, then by the earliest date. If no
-date is feasible the sweep says so instead of recommending anything.
+dates, where dates within a relative fuel tolerance (default 1%) are treated as
+equal and the earliest of them is chosen - sub-percent differences are below the
+fuel model's resolution and must not push departures later. If no date is
+feasible the sweep says so instead of recommending anything.
 """
 
 from __future__ import annotations
@@ -24,9 +26,19 @@ from antarctic_routing.routing.graph import RoutingGrid
 from antarctic_routing.synthetic import ScenarioSet
 
 SELECTION_RULE = (
-    "min expected fuel among feasible departure dates; ties broken by expected voyage "
-    "time, then the earliest date"
+    "min expected fuel among feasible departure dates; dates within {tol:.0%} of the "
+    "minimum are treated as equal and the earliest is selected"
 )
+
+
+def select_departure(options, fuel_tolerance: float = 0.01):
+    """Apply the declared selection rule to feasible options (None if none)."""
+    feasible = [o for o in options if o.feasible]
+    if not feasible:
+        return None
+    best_fuel = min(o.expected_fuel for o in feasible)
+    near = [o for o in feasible if o.expected_fuel <= best_fuel * (1 + fuel_tolerance)]
+    return min(near, key=lambda o: o.departure)
 
 
 @dataclass
@@ -85,6 +97,7 @@ def sweep_departures(
     n_scenario_routes: int = 3,
     confidence: float = 0.95,
     seed: int = 0,
+    fuel_tolerance: float = 0.01,
 ) -> DepartureSweep:
     options: list[DepartureOption] = []
     rgrid: RoutingGrid | None = None
@@ -109,13 +122,14 @@ def sweep_departures(
             ev.p_breach, ev.p_breach_upper, ev.beyond_horizon_fraction, list(chosen.labels), plan,
         ))
 
-    feasible = [o for o in options if o.feasible]
-    if not feasible:
-        return DepartureSweep(options, None, SELECTION_RULE,
+    rule = SELECTION_RULE.format(tol=fuel_tolerance)
+    best = select_departure(options, fuel_tolerance)
+    if best is None:
+        return DepartureSweep(options, None, rule,
                               f"No departure date in the window satisfies the {risk_budget:.1%} risk budget.")
-    best = min(feasible, key=lambda o: (o.expected_fuel, o.expected_hours, o.departure))
+    feasible = [o for o in options if o.feasible]
     return DepartureSweep(
-        options, best, SELECTION_RULE,
+        options, best, rule,
         (f"{len(feasible)} of {len(options)} departure dates meet the {risk_budget:.1%} risk budget; "
          f"selected {best.departure.isoformat()} (E[fuel index]={best.expected_fuel:.0f}, "
          f"E[time]={best.expected_hours:.1f} h, P(breach) upper bound {best.p_breach_upper:.1%})."),

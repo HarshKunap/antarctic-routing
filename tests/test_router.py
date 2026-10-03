@@ -148,3 +148,14 @@ def test_planner_reports_infeasible_instead_of_recommending():
     assert result.status == "infeasible"
     assert result.recommended is None
     assert "risk budget" in result.explanation
+
+
+def test_iced_destination_is_diagnosed_as_unavoidable():
+    conc = np.zeros((100, 3, NY, NX))
+    conc[:30, :, 4:7, 19:21] = 0.9  # destination area iced in 30% of scenarios
+    world = _world(k=100, conc=conc)
+    result = plan_candidates(world, _vessel(), A, B, risk_budget=0.05, risk_weights=[0, 100],
+                             n_scenario_routes=0)
+    assert result.status == "infeasible"
+    assert result.candidates[0].evaluation.destination_breach_prob == pytest.approx(0.3)
+    assert "destination itself" in result.explanation

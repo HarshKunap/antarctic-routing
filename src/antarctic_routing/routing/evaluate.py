@@ -42,6 +42,7 @@ class RouteEvaluation:
     beyond_horizon_fraction: float
     impassable_scenarios: int
     segment_breach_prob: list[float]
+    destination_breach_prob: float = 0.0
     scenario_arrival_hours: list[list[float]] | None = None
 
     def summary(self) -> dict:
@@ -134,5 +135,6 @@ def evaluate_route(
         beyond_horizon_fraction=float(np.mean(t > world.horizon_hours)),
         impassable_scenarios=int(impassable.sum()),
         segment_breach_prob=seg_prob,
+        destination_breach_prob=seg_prob[-1],
         scenario_arrival_hours=np.stack(arrivals, axis=1).tolist() if K <= 50 else None,
     )

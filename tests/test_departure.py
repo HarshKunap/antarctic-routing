@@ -58,3 +58,16 @@ def test_option_summary_is_json_friendly():
 
     sweep = _sweep(["clear", "blocked", "clear", "clear"])
     json.dumps(sweep.to_dict())
+
+
+def test_near_ties_within_tolerance_prefer_the_earliest_date():
+    from antarctic_routing.routing.departure import select_departure
+
+    class Opt:
+        def __init__(self, day, fuel, hours):
+            self.departure, self.expected_fuel, self.expected_hours, self.feasible = day, fuel, hours, True
+
+    opts = [Opt(DATES[0], 1005.0, 40.0), Opt(DATES[1], 1000.0, 39.9), Opt(DATES[2], 900.0, 45.0)]
+    assert select_departure(opts, fuel_tolerance=0.01).departure == DATES[2]   # clearly cheaper
+    opts[2].expected_fuel = 999.0
+    assert select_departure(opts, fuel_tolerance=0.01).departure == DATES[0]   # all within 1% -> earliest

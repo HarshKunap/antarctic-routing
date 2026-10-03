@@ -142,11 +142,16 @@ def plan_candidates(
     feasible = [c for c in candidates if c.feasible]
     if not feasible:
         ev = lowest_risk.evaluation
+        reason = (
+            f" The destination itself exceeds the vessel ice limit on arrival in "
+            f"{ev.destination_breach_prob:.0%} of scenarios, so no route choice can meet the budget."
+            if ev.destination_breach_prob > risk_budget else ""
+        )
         return PlanResult(
             "infeasible", None, candidates,
             (f"No candidate route satisfies the risk budget of {risk_budget:.1%} "
              f"({estimator}). Lowest-risk candidate: P(breach)={ev.p_breach:.1%}, "
-             f"upper bound {ev.p_breach_upper:.1%} over {ev.n_scenarios} scenarios. "
+             f"upper bound {ev.p_breach_upper:.1%} over {ev.n_scenarios} scenarios.{reason} "
              "Consider a later departure, a different destination, or a vessel with a higher ice capability."),
             risk_budget, estimator, warnings,
         )

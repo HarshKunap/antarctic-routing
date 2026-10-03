@@ -121,14 +121,25 @@ def _edge_latitude(dos: int, lon: np.ndarray) -> np.ndarray:
     return retreat + wave + weddell
 
 
+def _tongues(lon: np.ndarray, phase: float) -> np.ndarray:
+    """Ice tongues/embayments along the edge (~9 deg wavelength).
+
+    Their along-edge position (``phase``) differs between scenarios, which is
+    what makes route choice a genuine trade-off under uncertainty.
+    """
+    return 0.55 * np.sin(np.deg2rad(lon) * 40.0 + phase)
+
+
 def _member(
     rng: np.random.Generator,
     base_edges: list[np.ndarray],
-    lat: np.ndarray,
+    lat_lon: tuple[np.ndarray, np.ndarray],
     land: np.ndarray,
     smooth_cells: float,
 ) -> np.ndarray:
     n_t = len(base_edges)
+    lat, lon = lat_lon
+    tongues = _tongues(lon, rng.normal(0.0, 0.6))
     shift_amp = rng.normal()
     eta = np.zeros(lat.shape)
     out = np.empty((n_t, *lat.shape), np.float32)
@@ -140,7 +151,7 @@ def _member(
         noise /= noise.std() + 1e-12
         eta = 0.8 * eta + 0.6 * noise
         amp = 0.06 * (1 + 0.3 * t)
-        c = 0.95 * _sigmoid((base_edges[t] + shift - lat) / 0.35)
+        c = 0.95 * _sigmoid((base_edges[t] + tongues + shift - lat) / 0.35)
         c = np.clip(c + amp * eta * (0.3 + 2.8 * c * (1 - c)), 0.0, 1.0)
         c[land] = np.nan
         out[t] = c
@@ -170,8 +181,8 @@ def generate_synthetic(
     base_edges = [_edge_latitude(d, lon) for d in dos]
     smooth = 60_000.0 / grid.resolution_m
     rng = np.random.default_rng(seed)
-    conc = np.stack([_member(rng, base_edges, lat, land, smooth) for _ in range(n_scenarios)])
-    truth = _member(np.random.default_rng([seed, 99991]), base_edges, lat, land, smooth)
+    conc = np.stack([_member(rng, base_edges, (lat, lon), land, smooth) for _ in range(n_scenarios)])
+    truth = _member(np.random.default_rng([seed, 99991]), base_edges, (lat, lon), land, smooth)
 
     # ACC: eastward jet centred near 58S, weak meridional meander. m/s.
     u_e = 0.05 + 0.35 * np.exp(-(((lat + 58.0) / 2.5) ** 2))
