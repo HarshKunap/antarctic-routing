@@ -11,8 +11,9 @@ Real files on the MET Norway THREDDS server (checked on 2026-09-15, which
 reports ``product_id = OSI-401-d``, ``product_version = 4.1``) describe the
 ``status_flag`` bits only in a free-text ``flag_descriptions`` attribute, e.g.
 ``bit 7 (1000000): Land mask``, without CF ``flag_masks``/``flag_meanings``.
-Both layouts are supported. The product id stored in the file is carried into
-the dataset provenance.
+Both layouts are supported. The product id and version stored in each file are
+carried into the dataset provenance, next to the product family (e.g.
+``OSI-401`` for ``OSI-401-d``), so the family and the actual product stay distinct.
 """
 
 from __future__ import annotations
@@ -38,6 +39,7 @@ OSI_PROJ4 = "+proj=stere +a=6378273 +b=6356889.44891 +lat_0=-90 +lat_ts=-70 +lon
 NON_NAVIGABLE_FLAGS = ("land", "lake")
 DEFAULT_PRODUCT = "OSI-401-b"
 # "bit 6 (100000): Lake mask" -> ("100000", "Lake"); the value in brackets is the bit mask in binary.
+_PRODUCT_FAMILY = re.compile(r"osi-\d+", re.IGNORECASE)
 _DESCRIBED_MASK = re.compile(r"\(([01]+)\)\s*:\s*(\w+)\s+mask", re.IGNORECASE)
 
 
@@ -52,10 +54,17 @@ class SourceField:
     path: Path
     sha256: str
     product_id: str = DEFAULT_PRODUCT
+    product_version: str = ""
 
     @property
     def date(self) -> date:
         return self.day
+
+
+def product_family(product_id: str) -> str:
+    """``OSI-401-d`` -> ``OSI-401``, ``osi-450-a`` -> ``OSI-450``; unknown ids are returned unchanged."""
+    match = _PRODUCT_FAMILY.match(product_id.strip())
+    return match.group(0).upper() if match else product_id
 
 
 def _crs_of(ds: xr.Dataset, var: xr.DataArray) -> CRS:
@@ -116,6 +125,7 @@ def read_osisaf(path: str | Path) -> SourceField:
         x, y = _metres(ds["xc"]), _metres(ds["yc"])
         day = pd.Timestamp(ds["time"].values[0]).date() if "time" in ds.coords else None
         product_id = str(ds.attrs.get("product_id", DEFAULT_PRODUCT))
+        product_version = str(ds.attrs.get("product_version", ""))
     if day is None:
         raise ValueError(f"{path}: no time coordinate")
     if x[0] > x[-1]:
@@ -123,7 +133,8 @@ def read_osisaf(path: str | Path) -> SourceField:
     if y[0] > y[-1]:
         y, conc, land = y[::-1], conc[::-1], land[::-1]
     conc = np.where(land, np.nan, conc)
-    return SourceField(day, x, y, conc, land, crs, path, sha256_file(path), product_id)
+    return SourceField(day, x, y, conc, land, crs, path, sha256_file(path), product_id,
+                       product_version)
 
 
 def regrid_projected(
@@ -166,6 +177,9 @@ def build_sea_ice_dataset(paths: Sequence[str | Path], grid: PolarGrid) -> xr.Da
     ds["ice_concentration"].attrs.update(units="1", long_name="sea ice area fraction")
     ds.attrs.update(
         source_product=",".join(sorted({f.product_id for f in fields})),
+        source_product_family=",".join(sorted({product_family(f.product_id) for f in fields})),
+        source_product_ids=",".join(f.product_id for f in fields),
+        source_product_versions=",".join(f.product_version for f in fields),
         source_files=",".join(f.path.name for f in fields),
         source_sha256=",".join(f.sha256 for f in fields),
         execution_mode="real",

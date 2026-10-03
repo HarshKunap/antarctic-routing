@@ -60,6 +60,29 @@ def test_build_dataset_from_osisaf_files(tmp_path):
     assert stage["status"] == "passed" and len(stage["inputs"]) == 2
 
 
+def test_build_dataset_stage_records_product_family_and_actual_product(tmp_path):
+    """Provenance keeps the family (OSI-401) apart from the product each file reports (OSI-401-b/-d)."""
+    from datetime import date
+
+    from _osisaf_fixture import write_osisaf
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    write_osisaf(raw / "ice_b.nc", date(2024, 12, 1))
+    write_osisaf(raw / "ice_d.nc", date(2026, 9, 15), layout="osi401d")
+    out = tmp_path / "sea_ice.nc"
+    rc = main(["build-dataset", "--config", CONFIG, "--inputs", str(raw / "*.nc"), "--out", str(out),
+               "--resolution-km", "25"])
+    assert rc == 0
+    stage = json.loads(out.with_suffix(".stage-result.json").read_text())
+    by_name = {Path(r["path"]).name: r for r in stage["inputs"]}
+    assert by_name["ice_b.nc"]["source"] == "OSI-401-b" and by_name["ice_b.nc"]["product_version"] == ""
+    assert by_name["ice_d.nc"]["source"] == "OSI-401-d" and by_name["ice_d.nc"]["product_version"] == "4.1"
+    assert {r["product_family"] for r in stage["inputs"]} == {"OSI-401"}
+    assert stage["parameters"]["product_family"] == "OSI-401"
+    assert stage["parameters"]["source_product"] == "OSI-401-b,OSI-401-d"
+
+
 def test_fetch_sea_ice_reports_blocked_or_failed_without_network(tmp_path, monkeypatch):
     import antarctic_routing.ingestion.sea_ice as sea_ice
 

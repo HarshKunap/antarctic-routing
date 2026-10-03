@@ -13,7 +13,7 @@ import xarray as xr
 
 from _osisaf_fixture import OSI401D_BITS, _fixture_conc, write_osisaf
 from antarctic_routing.config import DomainSection
-from antarctic_routing.ingestion.osisaf_reader import _flag_mask, build_sea_ice_dataset, read_osisaf
+from antarctic_routing.ingestion.osisaf_reader import _flag_mask, build_sea_ice_dataset, product_family, read_osisaf
 from antarctic_routing.preprocessing.grid import PolarGrid
 
 DOMAIN = DomainSection(lat_min=-66.0, lat_max=-55.0, lon_min=-72.0, lon_max=-52.0)
@@ -104,3 +104,21 @@ def test_status_flag_without_any_flag_metadata_is_rejected(tmp_path):
     path = write_osisaf(tmp_path / "x.nc", date(2026, 9, 15), layout="osi401d", status_attrs={"units": "1"})
     with pytest.raises(ValueError, match="cannot identify land"):
         read_osisaf(path)
+
+
+@pytest.mark.parametrize(("product_id", "family"), [
+    ("OSI-401-d", "OSI-401"), ("OSI-401-b", "OSI-401"), ("osi-450-a", "OSI-450"), ("osi-430-a", "OSI-430"),
+    ("unknown", "unknown"),
+])
+def test_product_family_strips_the_version_suffix(product_id, family):
+    assert product_family(product_id) == family
+
+
+def test_dataset_records_family_and_per_file_product_and_version(tmp_path, grid):
+    paths = [write_osisaf(tmp_path / "b.nc", date(2024, 12, 1)),
+             write_osisaf(tmp_path / "d.nc", date(2026, 9, 15), layout="osi401d")]
+    ds = build_sea_ice_dataset(paths, grid)
+    assert ds.attrs["source_product_family"] == "OSI-401"
+    assert ds.attrs["source_files"] == "b.nc,d.nc"
+    assert ds.attrs["source_product_ids"] == "OSI-401-b,OSI-401-d"
+    assert ds.attrs["source_product_versions"] == ",4.1"

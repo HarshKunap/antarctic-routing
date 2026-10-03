@@ -60,7 +60,7 @@ def write_osisaf(path, day: date, land_box=None, missing_box=None, layout="cf", 
             conc[box(missing_box)] = np.nan
         flag_attrs = {"units": "1", "grid_mapping": "Polar_Stereographic_Grid",
                       "flag_descriptions": OSI401D_FLAG_DESCRIPTIONS}
-        product_id = "OSI-401-d"
+        product_id, product_version = "OSI-401-d", "4.1"
     else:
         if land_box:
             status[box(land_box)] = 1
@@ -68,7 +68,7 @@ def write_osisaf(path, day: date, land_box=None, missing_box=None, layout="cf", 
         if missing_box:
             conc[box(missing_box)] = np.nan
         flag_attrs = {"flag_values": np.array([0, 1, 2], np.int8), "flag_meanings": "nominal land lake"}
-        product_id = "OSI-401-b"
+        product_id, product_version = "OSI-401-b", None
     if status_attrs is not None:
         flag_attrs = status_attrs
     ds = xr.Dataset(
@@ -88,7 +88,7 @@ def write_osisaf(path, day: date, land_box=None, missing_box=None, layout="cf", 
         },
         coords={"time": [np.datetime64(f"{day.isoformat()}T12:00")],
                 "xc": ("xc", xc, {"units": "km"}), "yc": ("yc", yc, {"units": "km"})},
-        attrs={"product_id": product_id},
+        attrs={"product_id": product_id, **({"product_version": product_version} if product_version else {})},
     )
     ds.to_netcdf(path)
     return path

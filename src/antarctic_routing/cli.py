@@ -210,7 +210,7 @@ def cmd_fetch_sea_ice(args) -> int:
 def cmd_build_dataset(args) -> int:
     import glob
 
-    from antarctic_routing.ingestion.osisaf_reader import build_sea_ice_dataset
+    from antarctic_routing.ingestion.osisaf_reader import build_sea_ice_dataset, product_family
 
     t0, started = time.time(), utc_now()
     cfg = load_config(args.config)
@@ -224,10 +224,21 @@ def cmd_build_dataset(args) -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     ds.to_netcdf(out)
     imputed = float(ds["imputed_mask"].mean())
+    products = dict(zip(ds.attrs["source_files"].split(","),
+                        zip(ds.attrs["source_product_ids"].split(","),
+                            ds.attrs["source_product_versions"].split(","), strict=True), strict=True))
+    inputs = []
+    for p in paths:
+        product_id, version = products[Path(p).name]
+        record = file_record(Path(p), product_id)
+        record.update(product_family=product_family(product_id), product_version=version)
+        inputs.append(record)
     stage = StageResult(
         stage="harmonise_sea_ice", status="passed", execution_mode="real", software=SOFTWARE,
-        inputs=[file_record(Path(p), "OSI-401-b") for p in paths],
-        parameters={"resolution_km": grid.resolution_m / 1000, "crs": "EPSG:3031"},
+        inputs=inputs,
+        parameters={"resolution_km": grid.resolution_m / 1000, "crs": "EPSG:3031",
+                    "product_family": ds.attrs["source_product_family"],
+                    "source_product": ds.attrs["source_product"]},
         outputs=[file_record(out, "harmonised sea-ice dataset")],
         metrics={"days": int(ds.sizes["time"]), "imputed_fraction": imputed,
                  "land_fraction": float(ds["land_mask"].mean())},
