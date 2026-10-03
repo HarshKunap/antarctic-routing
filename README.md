@@ -14,6 +14,8 @@
 | **Safety claim** | "P = 3%, looks fine" | A route is accepted only if the **Wilson upper bound** on P(breach) is within budget, so the scenario sample must *prove* compliance |
 | **Question answered** | "Which route?" | "**When** should we leave, **and** which route?" - a departure-window sweep with a pre-declared selection rule |
 | **Honesty** | Always returns a route | Returns **`infeasible`** with a diagnosis (e.g. *"the destination itself is iced in 40% of scenarios"*) |
+| **Forecast** | One deterministic map | Residual U-Net (beats persistence, damped persistence and climatology at every lead 1-7 d) + **calibrated** hazard probabilities |
+| **Icebergs** | Static danger zones | Physics drift ensemble (dx/dt = u<sub>o</sub> + αu<sub>a</sub>) joined to the *same* joint scenarios as sea ice |
 | **Provenance** | - | Every stage emits a `StageResult` with checksums and `real` / `controlled_synthetic` / `modelled` labels; missing data = `blocked`, never faked |
 
 ---
@@ -29,7 +31,31 @@
 | ![Route map](docs/images/route_map.png) | ![Infeasible](docs/images/route_map_infeasible.png) |
 | Recommended route (red), P(breach) 1.5%, 95% upper bound 4.3% ≤ 5% | All candidates 40% - the **destination itself** is iced; no route can help, so the planner says so |
 
+**Iceberg avoidance.** A tracked berg (purple, drift-ensemble presence) sits on the direct line. The shortest route breaches in 100% of scenarios; the recommended route detours 23 km (+1.1 h) to P(breach) 1.5% (UB 4.3%).
+
+![Iceberg detour](docs/images/route_map_iceberg.png)
+
 Background: probability that ice concentration exceeds the vessel limit. Geography is a **schematic** Drake Passage → Bransfield Strait world (Tierra del Fuego, South Shetland Islands, Antarctic Peninsula), not a navigational coastline.
+
+---
+
+## 🧠 Phase 2 results: forecasting and calibration (controlled-synthetic)
+
+Trained on 14 seasons, validated on 3, tested on 3 **held-out** seasons (2021-2023), 14-day input, 1-7 day leads, 25 km grid. The synthetic history has real dynamics: a retreating edge, mean-reverting seasonal anomalies (ρ = 0.961 fitted on training seasons) and ice tongues drifting east with the current.
+
+![Forecast skill](docs/images/forecast_skill.png)
+
+| Lead | **Residual U-Net** | Direct U-Net | Persistence | Damped persistence | Climatology |
+|---|---|---|---|---|---|
+| 1 d | **0.0061** | 0.0083 | 0.0075 | 0.0071 | 0.0265 |
+| 4 d | **0.0115** | 0.0126 | 0.0199 | 0.0169 | 0.0255 |
+| 7 d | **0.0141** | 0.0148 | 0.0300 | 0.0231 | 0.0245 |
+
+MAE of concentration fraction on identical samples and ocean cells. The **direct** U-Net loses to persistence at day 1 ("a neural network is not automatically better than persistence"). Predicting the *change* from today's map (Ĉ = C<sub>t</sub> + Δ, zero-initialised head so an untrained model *is* persistence) fixes this: the residual model is 14% better than the best baseline at day 1 and 39% better at day 7, with ice-edge error (IIEE) roughly halved.
+
+![Reliability](docs/images/reliability.png)
+
+**Probabilities.** Members = forecast + whole historical error fields from training seasons, so they are coherent joint scenarios. The raw ensemble is **over-confident** (grey). Per-lead isotonic calibration fitted on validation seasons puts it on the diagonal (red) and lowers the Brier score at every lead on the test seasons. Brier skill vs climatology: 0.79 (1 d) to 0.38 (7 d).
 
 ---
 
@@ -42,7 +68,19 @@ python -m pip install -e ".[dev]"
 antroute validate-config                         # check config/config.yaml
 antroute demo --departure 2026-12-20             # -> artifacts/demo/
 antroute departures --start 2026-11-20 --end 2027-01-10 --step-days 3
-python -m pytest                                 # 132 tests
+antroute demo --departure 2026-12-20 --iceberg A23A:-60.2:-62.6 --berg-radius-km 15
+
+# Phase 2: forecasting (synthetic history by default; pass --data for real data)
+antroute train-forecast --resolution-km 25 --lead-days 7 --out models/unet
+antroute evaluate-forecast --resolution-km 25 --weights models/unet/best.pt
+antroute calibrate-forecast --resolution-km 25 --weights models/unet/best.pt
+
+# Real OSI SAF data (needs network access to thredds.met.no)
+antroute fetch-sea-ice --start 2024-11-01 --end 2025-02-28
+antroute build-dataset --inputs "data/raw/sea_ice/**/*.nc" --out data/processed/sea_ice.nc
+antroute train-forecast --data data/processed/sea_ice.nc --n-val 1 --n-test 1
+
+python -m pytest                                 # full test suite
 ```
 
 `antroute demo` writes `plan.json` (all candidates + explanation), `route_map.png`, `recommended_route.geojson` / `.csv` (with disclaimer, issue time, config SHA-256) and a provenance `stage-result.json`.
@@ -69,10 +107,10 @@ flowchart LR
 | Stage | Status | Module |
 |---|---|---|
 | 1 Scope & config | ✅ Validated config, Wilson scenario-count guard | `config.py` |
-| 2 Ingestion | ✅ Resumable, checksummed, `blocked` on missing credentials · ⏳ not yet run against live services | `ingestion/` |
+| 2 Ingestion | ✅ Resumable, checksummed, `blocked` on missing credentials; OSI SAF reader (own CRS from CF metadata) + dataset builder · ⏳ not yet run against live services | `ingestion/` |
 | 3 Harmonisation | ✅ Regridding, vector rotation, area-mean, imputation mask, season-aware climatology | `preprocessing/` |
-| 4 Sea-ice forecast | ✅ Persistence / climatology / damped-anomaly baselines · ⏳ U-Net | `forecasting/` |
-| 5 Iceberg drift | ⏳ Phase 2 (USNIC importer ready) | `ingestion/icebergs.py` |
+| 4 Sea-ice forecast | ✅ Baselines, residual U-Net, per-lead MAE/RMSE/IIEE evaluation, residual-bootstrap ensembles, isotonic calibration | `forecasting/` |
+| 5 Iceberg drift | ✅ RK2 physics with projection scale factor, ensembles, presence layers joined to route risk, learned correction validated on held-out icebergs | `iceberg/drift.py` |
 | 6 Hazard & fuel | ✅ | `routing/hazard.py`, `routing/fuel.py` |
 | 7 Route optimisation | ✅ Time-dependent A*, candidates, risk-budgeted selection | `routing/` |
 | 8 Departure planner | ✅ Window sweep + selection rule · ⏳ trust horizon, beyond-horizon climatology scenarios | `routing/departure.py` |
@@ -108,12 +146,13 @@ src/antarctic_routing/
   common/provenance.py      StageResult envelope, SHA-256, atomic JSON
   ingestion/                Stage 2 - OSI SAF, ERA5 (cdsapi), CMEMS (copernicusmarine), USNIC
   preprocessing/            Stage 3 - EPSG:3031 grid, regridding, climatology, splits
-  forecasting/baselines.py  Stage 4 - persistence, climatology, damped anomaly
+  forecasting/              Stage 4 - baselines, U-Net, training, per-lead evaluation, calibration
+  iceberg/drift.py          Stage 5 - drift physics, ensembles, presence layers, learned correction
   synthetic.py              controlled-synthetic joint scenarios (schematic world)
   routing/                  Stages 6-8 - hazard, fuel, graph, A*, evaluation, candidates, departures
   validation/metrics.py     Stage 10 - MAE, RMSE, Brier, reliability
   export.py, viz.py, cli.py GeoJSON/CSV, figures, `antroute` CLI
-tests/                      132 tests: hand-calculated values, behavioural routing worlds, leakage checks
+tests/                      hand-calculated values, behavioural routing worlds, leakage and split checks
 ```
 
 ---
@@ -125,13 +164,16 @@ tests/                      132 tests: hand-calculated values, behavioural routi
 - **No corner-cutting.** 16-connected moves are valid only if every crossed cell is navigable.
 - **Leakage.** Climatology, normalisation and ρ use training seasons only. Seasons span New Year (Nov-Feb) and are labelled by start year.
 - **Missing data is hazardous.** NaN concentration on an ocean cell is treated as ice, never as open water.
+- **OSI SAF is not EPSG:3031.** OSI-401-b uses its own stereographic grid (true scale 70°S, Hughes ellipsoid, km). The reader takes the CRS from the file's CF metadata.
+- **Iceberg drift on a map.** Velocities are ground speeds; a conformal projection moves a point at k·v, where k is the point scale factor. This is tested against geodesic distance (0.25 m/s × 6 h = 5.4 km).
+- **No leakage across icebergs.** The learned drift correction is validated with whole icebergs held out.
 
 ---
 
 ## 🛣️ Roadmap
 
-1. **Phase 1 (done here):** config, ingestion framework, harmonisation, baselines, hazard/fuel, router, departure sweep, exports.
-2. **Phase 2:** real OSI SAF/ERA5/CMEMS pipeline run, U-Net forecast vs baselines per lead time, calibrated probabilities (isotonic/logistic on validation seasons), physics iceberg drift (dx/dt = u<sub>o</sub> + αu<sub>a</sub>) with drift ensembles.
+1. **Phase 1 ✅** config, ingestion framework, harmonisation, baselines, hazard/fuel, router, departure sweep, exports.
+2. **Phase 2 ✅** OSI SAF reader, residual U-Net vs baselines per lead, calibrated probabilities, iceberg drift ensembles in route risk. *Pending:* first run on real OSI SAF/ERA5/CMEMS data, and wiring U-Net ensembles directly into the departure planner.
 3. **Phase 3:** climatology-anomaly scenarios beyond the forecast horizon, trust horizon (year-blocked bootstrap of skill vs baselines), voyage replanning and replay.
 4. **Phase 4:** historical replay backtests vs shortest-path and fixed ice-edge-buffer baselines, fuel-sensitivity analysis, FastAPI + polar web map (OpenLayers, EPSG:3031), Docker.
 
@@ -144,7 +186,7 @@ This project focuses on what sits between them: turning *forecast uncertainty* i
 
 ## ⚖️ Limitations
 
-- Results shown are **controlled-synthetic**; no real-world skill is claimed yet.
+- Results shown are **controlled-synthetic**; no real-world skill is claimed yet. Synthetic dynamics are simpler than real sea ice, so real-data skill margins will be smaller.
 - Ingestion clients are unit-tested with injected fetchers but have **not yet been run against the live services** (the development sandbox blocks outbound access to them).
 - Vessel parameters (`ice_class`, limit τ<sub>v</sub>, speed reduction, fuel λ) are **placeholders**. See [`docs/ASSUMPTIONS.md`](docs/ASSUMPTIONS.md).
 - USNIC tracks only giant icebergs; small-berg encounter risk is out of scope until SAR detection is added.

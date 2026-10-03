@@ -35,6 +35,18 @@ Stage 1 output: every value the system depends on, its status, and what must rep
 | Route scenarios | 200 | 🟩 | Resolution 0.5%; ML ensemble members can be expanded with forcing perturbations |
 | Missing data | treated as hazardous | 🟩 | Conservative default |
 
+## Forecasting and icebergs
+
+| Item | Value | Status | Notes |
+|---|---|---|---|
+| Input / lead window | 14 d in, 1-7 d out | 🟧 | Extend leads only after beating baselines |
+| Season split | chronological, val 3 / test 3 seasons | 🟩 | Climatology, ρ, residual bank: train only; calibration: validation only |
+| Ensemble | forecast + training-season residual fields, 20 members | 🟧 | Residuals assume the error statistics are stationary |
+| Iceberg wind factor α | U(0.01, 0.03) | 🟧 | Depends on berg size/shape; fit per berg class from tracks |
+| Iceberg position error | σ = 2 km | 🟥 | Use the reported USNIC position accuracy |
+| Iceberg safety radius | 10 km (CLI default) | 🟥 | Operator decision; should include berg size |
+| Iceberg coverage | USNIC giant bergs only | 🟥 | Small bergs/growlers need SAR detection |
+
 ## Synthetic world (development only)
 
 | Item | Status | Notes |
@@ -42,7 +54,8 @@ Stage 1 output: every value the system depends on, its status, and what must rep
 | Land mask | 🟥 | Hand-drawn schematic polygons; replace with NSIDC/ADD coastline mask |
 | Ice edge | 🟥 | Retreats 0.06°/day from 61.6°S on 1 Nov with Weddell tongue and uncertain tongues; replace with forecasts |
 | Currents | 🟥 | Schematic eastward ACC jet; replace with CMEMS `uo`/`vo` |
-| Icebergs | - | Not simulated yet (Phase 2) |
+| Winds | 🟥 | Schematic westerlies peaking near 57°S; replace with ERA5 u10/v10 |
+| Training history | 🟥 | `synthetic_history`: retreating edge, AR(1) season anomaly (0.97/day), tongues drifting 0.25° lon/day east |
 
 ## Known simplifications
 
