@@ -241,7 +241,8 @@ def cmd_train_forecast(args) -> int:
 
     cfg, ds, months, split = _forecast_data(args)
     tc = TrainConfig(history_days=args.history_days or cfg.forecast.history_days, lead_days=args.lead_days,
-                     epochs=args.epochs, base_channels=args.base_channels, seed=args.seed)
+                     epochs=args.epochs, base_channels=args.base_channels, seed=args.seed,
+                     residual=not args.direct)
     print(f"Training on seasons {split['train']}, validating on {split['val']} "
           f"({ds.attrs.get('execution_mode', 'real')} data)")
     result = train_unet(ds, split["train"], split["val"], months, tc, args.out)
@@ -369,6 +370,7 @@ def _parser() -> argparse.ArgumentParser:
     forecast_common(tf)
     tf.add_argument("--epochs", type=int, default=30)
     tf.add_argument("--base-channels", type=int, default=16)
+    tf.add_argument("--direct", action="store_true", help="predict C directly instead of C_t + change")
     tf.add_argument("--out", default="models/unet")
     tf.set_defaults(func=cmd_train_forecast)
 

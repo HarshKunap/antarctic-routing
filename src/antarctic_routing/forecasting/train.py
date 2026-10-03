@@ -35,6 +35,7 @@ class TrainConfig:
     weight_decay: float = 1e-5
     patience: int = 6
     seed: int = 0
+    residual: bool = True
 
 
 @dataclass
@@ -97,7 +98,8 @@ def train_unet(
     train_loader = DataLoader(train, batch_size=cfg.batch_size, shuffle=True, generator=gen)
     val_loader = DataLoader(val, batch_size=cfg.batch_size)
 
-    model = IceUNet(train.in_channels, cfg.lead_days, base=cfg.base_channels)
+    model = IceUNet(train.in_channels, cfg.lead_days, base=cfg.base_channels,
+                    persistence_channel=cfg.history_days - 1 if cfg.residual else None)
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(cfg.epochs, 1))
     out = Path(out_dir)
@@ -130,6 +132,7 @@ def train_unet(
     model.eval()
     meta = {
         "in_channels": train.in_channels, "out_channels": cfg.lead_days, "base_channels": cfg.base_channels,
+        "persistence_channel": model.persistence_channel,
         "train_config": asdict(cfg), "train_seasons": sorted(train_seasons), "val_seasons": sorted(val_seasons),
         "season_months": list(season_months), "best_epoch": result.best_epoch, "val_mae": best,
         "execution_mode": ds.attrs.get("execution_mode", "real"), "grid_shape": list(train.land.shape),
@@ -144,7 +147,8 @@ def train_unet(
 def load_model(path: str | Path) -> tuple[IceUNet, dict]:
     blob = torch.load(path, map_location="cpu", weights_only=True)
     meta = blob["meta"]
-    model = IceUNet(meta["in_channels"], meta["out_channels"], base=meta["base_channels"])
+    model = IceUNet(meta["in_channels"], meta["out_channels"], base=meta["base_channels"],
+                    persistence_channel=meta.get("persistence_channel"))
     model.load_state_dict(blob["state_dict"])
     return model.eval(), meta
 

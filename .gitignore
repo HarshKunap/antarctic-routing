@@ -11,7 +11,8 @@ data/processed/
 data/forecasts/
 artifacts/*
 !artifacts/.keep
-models/*.pt
+models/
+reports/
 *.nc
 *.zarr/
 .env

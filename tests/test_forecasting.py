@@ -131,3 +131,22 @@ def test_evaluation_rejects_overlapping_train_and_test_seasons(history):
 
 def test_issue_date_helper():
     assert season_of(date(2027, 1, 5), SEASON) == 2026
+
+
+def test_residual_unet_with_zero_head_reproduces_persistence_exactly():
+    torch.manual_seed(0)
+    model = IceUNet(in_channels=8, out_channels=3, base=8, persistence_channel=4).eval()
+    x = torch.rand(2, 8, 19, 23)
+    with torch.no_grad():
+        out = model(x)
+    assert torch.allclose(out, x[:, 4:5].expand_as(out))   # zero-initialised head => C_t for every lead
+
+
+def test_residual_unet_output_stays_in_unit_interval():
+    torch.manual_seed(1)
+    model = IceUNet(in_channels=8, out_channels=3, base=8, persistence_channel=4)
+    with torch.no_grad():
+        model.head.weight.normal_(0, 5.0)
+        model.head.bias.normal_(0, 5.0)
+    out = model(torch.rand(2, 8, 16, 16))
+    assert out.min() >= 0 and out.max() <= 1

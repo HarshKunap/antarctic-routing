@@ -81,6 +81,8 @@ class ScenarioSet:
     description: str
     truth_conc: np.ndarray | None = None
     berg: np.ndarray | None = None  # (K, T, ny, nx) bool, optional
+    wind_x: np.ndarray | None = None  # (T, ny, nx) 10 m wind, grid-aligned, m/s
+    wind_y: np.ndarray | None = None
 
     @property
     def n_scenarios(self) -> int:
@@ -192,6 +194,10 @@ def generate_synthetic(
     cx, cy = grid.rotate_en_to_xy(u_e, v_n, lon)
     cx[land] = 0.0
     cy[land] = 0.0
+    # Southern Ocean westerlies, strongest near 57S. m/s.
+    w_e = 4.0 + 8.0 * np.exp(-(((lat + 57.0) / 4.0) ** 2))
+    w_n = 2.0 * np.sin(np.deg2rad(lon) * 6.0)
+    wx, wy = grid.rotate_en_to_xy(w_e, w_n, lon)
 
     return ScenarioSet(
         grid=grid,
@@ -207,6 +213,8 @@ def generate_synthetic(
             f"{n_scenarios} joint scenarios, seed={seed}. Not real data."
         ),
         truth_conc=truth,
+        wind_x=np.broadcast_to(wx, (n_days, *grid.shape)).copy(),
+        wind_y=np.broadcast_to(wy, (n_days, *grid.shape)).copy(),
     )
 
 

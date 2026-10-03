@@ -1,7 +1,15 @@
 """Compact U-Net for multi-lead sea-ice concentration forecasting.
 
 Inputs are padded (replicate) to a multiple of 2**depth and the output is
-cropped back, so any grid size works. A sigmoid head keeps forecasts in [0, 1].
+cropped back, so any grid size works.
+
+Two output modes:
+
+* direct (``persistence_channel=None``): C_hat = sigmoid(head);
+* residual (``persistence_channel=i``): C_hat = clip(C_t + head, 0, 1), where
+  C_t is input channel i (today's map). The head is zero-initialised, so an
+  untrained model *is* persistence and training only has to learn the change.
+  This is what lets the network match persistence at short leads.
 """
 
 from __future__ import annotations
@@ -19,9 +27,11 @@ def _block(cin: int, cout: int) -> nn.Sequential:
 
 
 class IceUNet(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, base: int = 16, depth: int = 3) -> None:
+    def __init__(self, in_channels: int, out_channels: int, base: int = 16, depth: int = 3,
+                 persistence_channel: int | None = None) -> None:
         super().__init__()
         self.depth = depth
+        self.persistence_channel = persistence_channel
         chans = [base * 2**i for i in range(depth + 1)]
         self.down = nn.ModuleList([_block(in_channels, chans[0])] +
                                   [_block(chans[i], chans[i + 1]) for i in range(depth)])
@@ -30,9 +40,14 @@ class IceUNet(nn.Module):
         )
         self.dec = nn.ModuleList([_block(chans[i] * 2, chans[i]) for i in reversed(range(depth))])
         self.head = nn.Conv2d(chans[0], out_channels, 1)
+        if persistence_channel is not None:
+            nn.init.zeros_(self.head.weight)
+            nn.init.zeros_(self.head.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h, w = x.shape[-2:]
+        today = x[:, self.persistence_channel: self.persistence_channel + 1] if self.persistence_channel is not None \
+            else None
         m = 2**self.depth
         ph, pw = (-h) % m, (-w) % m
         x = F.pad(x, (0, pw, 0, ph), mode="replicate")
@@ -45,4 +60,7 @@ class IceUNet(nn.Module):
         for up, dec in zip(self.up, self.dec, strict=True):
             x = up(x)
             x = dec(torch.cat([x, skips.pop()], dim=1))
-        return torch.sigmoid(self.head(x))[..., :h, :w]
+        out = self.head(x)[..., :h, :w]
+        if today is None:
+            return torch.sigmoid(out)
+        return torch.clamp(today + out, 0.0, 1.0)
