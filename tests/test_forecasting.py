@@ -276,3 +276,44 @@ def test_checkpoint_without_grid_provenance_is_rejected(history, trained_on_file
     load_model(legacy)  # loading without a dataset still works
     with pytest.raises(ValueError, match="no grid provenance"):
         load_model(legacy, history)
+
+
+# ------------------------------------------------- baseline fitting on observed cells
+def _train_days(history, seasons=(2010, 2011, 2012, 2013)):
+    days = [np.datetime64(t, "D").astype(object) for t in history["time"].values]
+    return [i for i, d in enumerate(days) if season_of(d, SEASON) in seasons]
+
+
+def test_fit_baselines_ignores_values_at_imputed_cells(history):
+    from antarctic_routing.forecasting.evaluate import fit_baselines
+
+    cells = _ocean_block(history)
+    flagged = _train_days(history)[::2]  # every other training day, so the cells keep some observed data
+
+    def variant(fill, flag):
+        h = history.copy(deep=True)
+        for d in flagged:
+            h["ice_concentration"].values[d, cells] = fill
+            h["imputed_mask"].values[d, cells] = flag
+        return fit_baselines(h, [2010, 2011, 2012, 2013], SEASON)
+
+    (clim0, rho0), (clim1, rho1) = variant(0.0, True), variant(1.0, True)
+    assert np.array_equal(clim0.mean, clim1.mean, equal_nan=True) and rho0 == rho1  # imputed values never used
+    (clim_u, rho_u) = variant(1.0, False)  # control: the same values, treated as observed, do change the fit
+    assert not np.array_equal(clim0.mean, clim_u.mean, equal_nan=True) and rho0 != rho_u
+
+
+def test_fit_baselines_unchanged_when_nothing_is_imputed(history):
+    from antarctic_routing.forecasting.baselines import fit_anomaly_decay
+    from antarctic_routing.forecasting.evaluate import fit_baselines
+    from antarctic_routing.preprocessing.climatology import Climatology
+
+    assert not history["imputed_mask"].values.any()
+    train = [2010, 2011, 2012, 2013]
+    clim, rho = fit_baselines(history, train, SEASON)
+    days = [np.datetime64(t, "D").astype(object) for t in history["time"].values]
+    conc = history["ice_concentration"].values.astype(float)
+    ref = Climatology.fit(conc, days, train, SEASON, window_days=7)  # previous behaviour: raw values
+    segments = [np.stack([ref.anomaly(conc[i], days[i]) for i in _train_days(history, (s,))]) for s in train]
+    assert np.array_equal(clim.mean, ref.mean, equal_nan=True)
+    assert rho == pytest.approx(fit_anomaly_decay(segments), abs=1e-12)

@@ -36,8 +36,14 @@ def true_cell_area_km2(ds: xr.Dataset) -> np.ndarray:
 
 
 def fit_baselines(ds: xr.Dataset, train_seasons: Sequence[int], season_months: Sequence[int]):
+    """Climatology and damped-persistence rho from training seasons, observed ocean cells only.
+
+    Cells that are land or imputed on a given day are set to NaN before fitting, so
+    they contribute neither to the climatology nor to the anomaly pairs behind rho
+    (the same ``ocean AND NOT imputed`` definition used for scoring).
+    """
     days = [np.datetime64(t, "D").astype(object) for t in ds["time"].values]
-    conc = ds["ice_concentration"].values.astype(float)
+    conc = np.where(valid_target_mask(ds), ds["ice_concentration"].values.astype(float), np.nan)
     clim = Climatology.fit(conc, days, train_seasons, season_months, window_days=7)
     segments = []
     for s in sorted(set(train_seasons)):
