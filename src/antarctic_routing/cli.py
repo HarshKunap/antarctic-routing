@@ -418,6 +418,49 @@ def cmd_plan_window(args) -> int:
     return 0
 
 
+def cmd_replay(args) -> int:
+    import json
+
+    import numpy as np
+
+    from antarctic_routing.forecasting.scenarios import grid_of
+    from antarctic_routing.replay import run_replay
+    from antarctic_routing.routing.replan import ReplanPolicy
+    from antarctic_routing.viz import plot_replay
+
+    cfg, ds, months, split = _forecast_data(args)
+    ctx, meta = _forecast_context(args, ds, months, split)
+    trust = int(json.loads(Path(args.trust_report).read_text())["trust_horizon_days"]) if args.trust_report else None
+    grid = grid_of(ds)
+    o = grid.cell_of(cfg.route.origin.lat, cfg.route.origin.lon)
+    d = grid.cell_of(cfg.route.destination.lat, cfg.route.destination.lon)
+    out = Path(args.out)
+    audit = out / "audit.jsonl"
+    audit.unlink(missing_ok=True)
+    policy = ReplanPolicy(cfg.routing.risk_budget, cfg.routing.risk_estimator, cfg.routing.confidence)
+    result = run_replay(ctx, VesselModel.from_config(cfg), o, d, args.start, args.window_days, args.max_wait_days,
+                        args.members, policy, cfg.routing.risk_weights, _horizon_days(cfg),
+                        np.random.default_rng(args.seed), audit_path=audit, trust_horizon_days=trust,
+                        connectivity=cfg.routing.connectivity, scenario_routes=args.scenario_routes, seed=args.seed)
+    result["model_train_seasons"] = meta["train_seasons"]
+    from antarctic_routing.preprocessing.climatology import season_of
+
+    replay_season = season_of(args.start, months)
+    if replay_season in set(meta["train_seasons"]):
+        result["warning"] = f"replay season {replay_season} was used to train the model (in-sample replay)"
+    write_json_artifact(out / "replay.json", result)
+    plot_replay(result, ctx, cfg.vessel.max_ice_concentration, out / "replay.png",
+                f"Voyage replay from {args.start}")
+    for rec in result["days"]:
+        print(f"  {rec['day']}  {rec['phase']:8s} {rec['action']:18s} {', '.join(rec.get('triggers') or [])}")
+    if "truth" in result:
+        for name in ("planner", "naive"):
+            t = result["truth"][name]
+            print(f"  {name:8s} left {t['departure']}  {t['hours']:.1f} h  fuel {t['fuel_index']:.0f}  "
+                  f"observed-ice cells {t['observed_breach_cells']}")
+    return 0
+
+
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="antroute", description=__doc__.splitlines()[0])
     p.add_argument("--version", action="version", version=f"antarctic-routing {__version__}")
@@ -518,6 +561,18 @@ def _parser() -> argparse.ArgumentParser:
     pw.add_argument("--require-trusted", action="store_true")
     pw.add_argument("--out", default="reports/window")
     pw.set_defaults(func=cmd_plan_window)
+
+    rp = sub.add_parser("replay", help="day-by-day historical voyage replay with replanning")
+    forecast_common(rp)
+    rp.add_argument("--weights", default="models/unet/best.pt")
+    rp.add_argument("--start", type=date.fromisoformat, required=True)
+    rp.add_argument("--window-days", type=int, default=7)
+    rp.add_argument("--max-wait-days", type=int, default=30)
+    rp.add_argument("--members", type=int, default=200)
+    rp.add_argument("--scenario-routes", type=int, default=1)
+    rp.add_argument("--trust-report", default=None)
+    rp.add_argument("--out", default="reports/replay")
+    rp.set_defaults(func=cmd_replay)
     return p
 
 

@@ -266,3 +266,81 @@ def plot_trust_horizon(result: dict, path: str | Path, title: str) -> Path:
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
     return out
+
+
+def plot_replay(result: dict, ctx, tau: float, path: str | Path, title: str) -> Path:
+    """Sailed vs naive track over observed ice, and how the departure advice evolved."""
+    from datetime import date as _date
+
+    from antarctic_routing.forecasting.scenarios import grid_of
+
+    grid = grid_of(ctx.ds)
+    rot = _rotator(grid)
+    half = grid.resolution_m / 2
+    XE, YE = rot(*np.meshgrid(np.r_[grid.x - half, grid.x[-1] + half], np.r_[grid.y - half, grid.y[-1] + half]))
+    land = ctx.ds["land_mask"].values.astype(bool)
+    dep = result.get("departure") or result["start"]
+    obs = ctx.ds["ice_concentration"].values[ctx.index_of(_date.fromisoformat(dep))]
+
+    fig, (ax, tx) = plt.subplots(1, 2, figsize=(14, 6.4), dpi=120, gridspec_kw={"width_ratios": [1.15, 1]})
+    ax.pcolormesh(XE, YE, np.ma.masked_where(land | ~np.isfinite(obs), np.nan_to_num(obs) >= tau),
+                  cmap=ListedColormap(["#f4f8fc", "#2b5c8a"]), vmin=0, vmax=1, zorder=0)
+    ax.pcolormesh(XE, YE, np.ma.masked_where(~land, land.astype(float)), cmap=ListedColormap(["#d9d2c3"]), zorder=1)
+
+    def xy(cells):
+        r = np.array([c[0] for c in cells])
+        c = np.array([c[1] for c in cells])
+        return rot(grid.x[c], grid.y[r])
+
+    if result.get("naive_cells"):
+        nv = result["truth"]["naive"]
+        ax.plot(*xy(result["naive_cells"]), "--", color="#5b6b7f", lw=1.6,
+                label=f"naive: leave {nv['departure']}, shortest route - "
+                      f"{nv['observed_breach_cells']} cells in observed ice")
+    if result.get("sailed_cells"):
+        pl = result["truth"]["planner"]
+        ax.plot(*xy(result["sailed_cells"]), color="#d1495b", lw=2.6,
+                label=f"planner: leave {pl['departure']} - {pl['observed_breach_cells']} cells in observed ice")
+        for rec in result["days"]:
+            if rec.get("position"):
+                px, py = rot(*grid.to_xy(*rec["position"]))
+                ax.scatter(px, py, s=28, color="white", edgecolor="#d1495b", zorder=5)
+    ax.set_aspect("equal")
+    ax.set_xlim(XE.min(), XE.max())
+    ax.set_ylim(YE.min(), YE.max())
+    ax.legend(loc="lower left", fontsize=7.5, framealpha=0.95)
+    ax.set_title(f"Observed ice >= {tau} on departure day ({dep}); dots = daily positions", fontsize=9)
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+    port = [r for r in result["days"] if r["phase"] == "port"]
+    issue = [_date.fromisoformat(r["day"]) for r in port]
+    rec = [_date.fromisoformat(r["recommended_departure"]) if r["recommended_departure"] else None for r in port]
+    ok = [(i, d) for i, d in zip(issue, rec, strict=True) if d is not None]
+    none = [i for i, d in zip(issue, rec, strict=True) if d is None]
+    if ok:
+        tx.scatter([i for i, _ in ok], [d for _, d in ok], color="#3a8f6b", s=40,
+                   label="recommended departure", zorder=3)
+    if none:
+        tx.scatter(none, none, marker="x", color="#d1495b", s=40, label="no date in window meets the budget", zorder=3)
+    if issue:
+        tx.plot([issue[0], issue[-1]], [issue[0], issue[-1]], color="black", lw=0.8, alpha=0.5, label="today")
+    if result.get("departure"):
+        tx.axhline(_date.fromisoformat(result["departure"]), color="#d1495b", lw=1.2, ls="--", label="actual departure")
+    tx.set_xlabel("forecast issue day (in port)")
+    tx.set_ylabel("recommended departure date")
+    tx.grid(alpha=0.3)
+    tx.legend(fontsize=8, loc="upper left")
+    at_sea = [r for r in result["days"] if r["phase"] == "at_sea"]
+    switches = sum(r["action"] == "switch" for r in at_sea)
+    tx.set_title(f"Departure advice as information arrived; at sea: {len(at_sea)} replans, {switches} route switch(es)",
+                 fontsize=9)
+    fig.autofmt_xdate()
+    fig.suptitle(f"{title}\n{result['execution_mode'].upper()} - only information available each day was used",
+                 fontsize=10)
+    fig.text(0.01, 0.005, DISCLAIMER, fontsize=6, color="#555")
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+    return out

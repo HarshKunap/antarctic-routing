@@ -164,3 +164,17 @@ def test_plan_window_from_one_forecast_issue(tmp_path):
     assert out["layer_source"][0] == "observed" and "climatology" in out["layer_source"]
     assert all(o["support"] in ("forecast-supported", "climatology-dominated") for o in out["options"])
     assert (tmp_path / "w" / "departure_window.png").is_file()
+
+
+def test_replay_cli_writes_log_figure_and_summary(tmp_path):
+    common = ["--config", CONFIG, "--synthetic-seasons", "2010:2016", "--resolution-km", "50",
+              "--history-days", "5", "--lead-days", "3", "--n-val", "1", "--n-test", "1"]
+    assert main(["train-forecast", *common, "--epochs", "1", "--base-channels", "8",
+                 "--out", str(tmp_path / "model")]) == 0
+    rc = main(["replay", *common, "--weights", str(tmp_path / "model" / "best.pt"), "--start", "2015-11-20",
+               "--window-days", "4", "--members", "80", "--out", str(tmp_path / "r")])
+    assert rc == 0
+    summary = json.loads((tmp_path / "r" / "replay.json").read_text())
+    assert summary["start"] == "2015-11-20" and "truth" in summary
+    assert (tmp_path / "r" / "audit.jsonl").is_file()
+    assert (tmp_path / "r" / "replay.png").is_file()
