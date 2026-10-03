@@ -134,24 +134,30 @@ def plot_departures(sweep: DepartureSweep, risk_budget: float, path: str | Path,
         if opt.support == "climatology-dominated":
             bar.set_hatch("///")
             bar.set_edgecolor("white")
+    top = axes[0].get_xaxis_transform()  # x in data, y in axes fraction
     if issue is not None:
         from datetime import timedelta
 
-        marks = []
+        marks: dict = {}
         if forecast_days is not None:
-            marks.append((issue + timedelta(days=forecast_days), "#4f86c6", f"forecast horizon ({forecast_days} d)"))
+            marks.setdefault(issue + timedelta(days=forecast_days), []).append(("forecast", forecast_days))
         if trust_horizon_days is not None:
-            marks.append((issue + timedelta(days=trust_horizon_days), "#7a4fb3",
-                          f"trust horizon ({trust_horizon_days} d)"))
-        for when, colour, label in marks:
+            marks.setdefault(issue + timedelta(days=trust_horizon_days), []).append(("trust", trust_horizon_days))
+        for when, kinds in marks.items():
+            colour = "#7a4fb3" if any(k == "trust" for k, _ in kinds) else "#4f86c6"
+            label = " & ".join(k for k, _ in kinds) + f" horizon ({kinds[0][1]} d)"
             for ax in axes:
                 ax.axvline(when, color=colour, ls="--", lw=1.2)
-            axes[0].text(when, 1.02, " " + label, color=colour, fontsize=7, va="bottom")
-        axes[0].bar([], [], color="#888", hatch="///", edgecolor="white", label="climatology-dominated voyage")
-    axes[0].axhline(risk_budget, color="black", ls="--", lw=1, label=f"risk budget {risk_budget:.0%}")
+            axes[0].text(when, 1.01, label, transform=top, color=colour, fontsize=7, ha="center", va="bottom")
+    handles = []
+    if any(o.support == "climatology-dominated" for o in opts):
+        from matplotlib.patches import Patch
+
+        handles.append(Patch(facecolor="#888", hatch="///", edgecolor="white", label="climatology-dominated voyage"))
+    budget_line = axes[0].axhline(risk_budget, color="black", ls="--", lw=1, label=f"risk budget {risk_budget:.0%}")
     axes[0].set_ylabel("P(breach)\nupper bound")
-    axes[0].set_ylim(0, 1.05)
-    axes[0].legend(fontsize=8)
+    axes[0].set_ylim(0, min(1.05, max(0.12, 1.3 * max([*ub, risk_budget]))))
+    axes[0].legend(handles=[budget_line, *handles], fontsize=8)
     axes[1].plot(dates, hours, marker="o", color="#4f86c6")
     axes[1].set_ylabel("E[voyage] (h)")
     axes[2].plot(dates, fuel, marker="o", color="#c27c2c")
@@ -159,8 +165,9 @@ def plot_departures(sweep: DepartureSweep, risk_budget: float, path: str | Path,
     if sweep.selected:
         for ax in axes:
             ax.axvline(sweep.selected.departure, color="#1b998b", lw=2, alpha=0.6)
-        axes[0].text(sweep.selected.departure, 0.95, " selected", color="#1b998b", fontsize=8, va="top")
-    axes[0].set_title(f"{title}\n{sweep.rule}", fontsize=9)
+        axes[0].text(sweep.selected.departure, 0.95, " selected", transform=top, color="#1b998b", fontsize=8,
+                     va="top")
+    axes[0].set_title(f"{title}\n{sweep.rule}", fontsize=9, pad=16)
     fig.autofmt_xdate()
     fig.text(0.01, 0.005, DISCLAIMER, fontsize=6, color="#555", wrap=True)
     out = Path(path)

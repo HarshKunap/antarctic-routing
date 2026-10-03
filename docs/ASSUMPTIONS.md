@@ -47,6 +47,18 @@ Stage 1 output: every value the system depends on, its status, and what must rep
 | Iceberg safety radius | 10 km (CLI default) | 🟥 | Operator decision; should include berg size |
 | Iceberg coverage | USNIC giant bergs only | 🟥 | Small bergs/growlers need SAR detection |
 
+## Departure planning and replanning
+
+| Item | Value | Status | Notes |
+|---|---|---|---|
+| Beyond-horizon scenarios | climatology + one training season's anomaly sequence per member | 🟧 | Training seasons must reflect the intended climate baseline |
+| Trust horizon | season-blocked bootstrap, 95% one-sided, Δ > 0 vs damped persistence **and** climatology | 🟧 | Set `--min-delta` to an operationally meaningful gain |
+| Departure selection | min E[fuel] among feasible dates; ties within 1% → earliest | 🟧 | `--require-trusted` restricts selection to trusted voyages |
+| Switch thresholds | risk −2 points with ≤ 5% extra fuel, or ≥ 5% fuel saving | 🟥 | Operator policy |
+| Alert corridor | 25 km path deviation | 🟥 | Operator policy |
+| Stale input | > 36 h | 🟥 | Depends on product latency |
+| Replay vessel motion | ships depart at 00:00 and advance in 24 h steps through observed daily ice | 🟧 | Real operations use continuous position reports |
+
 ## Synthetic world (development only)
 
 | Item | Status | Notes |
@@ -61,5 +73,5 @@ Stage 1 output: every value the system depends on, its status, and what must rep
 
 - Ground speed uses only the along-track current; cross-track drift (crabbing) is ignored.
 - Search uses conditions at edge departure (speed) and arrival (ice); exact for travel time only under FIFO.
-- Conditions beyond the generated horizon reuse the last layer and are flagged (`beyond_horizon_fraction`). Phase 3 replaces this with climatology-anomaly scenarios.
+- Forecast-issued scenarios use climatology-anomaly sequences beyond the model horizon. Times past the *last generated layer* still reuse that layer and are flagged (`beyond_horizon_fraction`); generate enough layers for the window plus the voyage.
 - Candidate routes are evaluated on the same scenarios used to plan them (in-sample). Independent validation comes from historical replay (Phase 4).

@@ -59,6 +59,33 @@ MAE of concentration fraction on identical samples and ocean cells. The **direct
 
 ---
 
+## 🧭 Phase 3 results: deciding *when* to leave, and adapting at sea (controlled-synthetic)
+
+**Forecast-driven scenarios.** A forecast issued on day *t* becomes joint scenarios: layer 0 is the observation; leads 1-14 are the U-Net plus whole training-season error sequences; beyond the forecast horizon, each member replays one training season's daily **anomaly sequence** on top of climatology (it never repeats the last forecast). A test confirms that overwriting every observation after the issue date leaves the scenarios **byte-identical**, so there is no look-ahead.
+
+**Trust horizon.** The last lead for which the model's improvement over *both* damped persistence and climatology has a positive 95% lower bound under a **season-blocked bootstrap** (5 held-out seasons).
+
+![Trust horizon](docs/images/trust_horizon.png)
+
+On this synthetic history the U-Net keeps significant skill through day 14, so the horizon is reported as **≥ 14 d (limited by the evaluated leads)**, not as a measured end point. The margin over climatology shrinks with lead (0.022 → 0.007), and real sea ice should give a much shorter horizon.
+
+**Departure window from one forecast.** Forecast issued 28 Nov 2023 (held-out season), 200 joint scenarios, departures +0 … +13 d. Only the next three days demonstrably meet the 5% budget. Later dates get *riskier* even though the ice is retreating, because forecast uncertainty grows with lead time. The planner selects **today**.
+
+![Departure window](docs/images/departure_window.png)
+
+**Replanning and replay.** Each day in port, the planner issues a forecast and plans the window; it leaves only when the selected departure is *today*. At sea, the ship advances 24 h through the **observed** ice and then replans from its position. It switches route only when the current route exceeds the budget or an alternative is materially better, and raises an alert only when the path moves more than 25 km. Every decision is appended to `audit.jsonl`.
+
+![Replay](docs/images/replay.png)
+
+| Replay from 15 Nov 2023 | Departs | Voyage | Fuel index | Route cells in observed ice ≥ 15% |
+|---|---|---|---|---|
+| Naive (leave day 1, shortest route) | 15 Nov | 38.6 h | 921 | **3** |
+| **This system** | 25 Nov (advice evolved daily) | 37.1 h | **838** | **0** |
+
+One replay on synthetic data is a demonstration, not evidence. Phase 4 repeats it across seasons and start dates. It also measures the cost of caution: in another replay, the planner waited two days when leaving on day 1 would also have been safe.
+
+---
+
 ## 🚀 Quickstart
 
 ```bash
@@ -74,6 +101,15 @@ antroute demo --departure 2026-12-20 --iceberg A23A:-60.2:-62.6 --berg-radius-km
 antroute train-forecast --resolution-km 25 --lead-days 7 --out models/unet
 antroute evaluate-forecast --resolution-km 25 --weights models/unet/best.pt
 antroute calibrate-forecast --resolution-km 25 --weights models/unet/best.pt
+
+# Phase 3: trust horizon, departure window from one forecast, day-by-day replay
+S="--synthetic-seasons 2002:2026 --resolution-km 25 --n-val 3 --n-test 5"
+antroute train-forecast $S --lead-days 14 --out models/unet14
+antroute evaluate-forecast $S --weights models/unet14/best.pt --out reports/forecast14
+antroute trust-horizon --report reports/forecast14/forecast_eval.json
+antroute plan-window $S --weights models/unet14/best.pt --issue 2023-11-28 --window-days 14 \
+    --trust-report reports/trust/trust_horizon.json
+antroute replay $S --weights models/unet14/best.pt --start 2023-11-15 --window-days 7
 
 # Real OSI SAF data (needs network access to thredds.met.no)
 antroute fetch-sea-ice --start 2024-11-01 --end 2025-02-28
@@ -113,9 +149,9 @@ flowchart LR
 | 5 Iceberg drift | ✅ RK2 physics with projection scale factor, ensembles, presence layers joined to route risk, learned correction validated on held-out icebergs | `iceberg/drift.py` |
 | 6 Hazard & fuel | ✅ | `routing/hazard.py`, `routing/fuel.py` |
 | 7 Route optimisation | ✅ Time-dependent A*, candidates, risk-budgeted selection | `routing/` |
-| 8 Departure planner | ✅ Window sweep + selection rule · ⏳ trust horizon, beyond-horizon climatology scenarios | `routing/departure.py` |
-| 9 Replanning | ⏳ Phase 3 | - |
-| 10 Validation | ✅ MAE/RMSE/Brier/reliability · ⏳ historical replay | `validation/` |
+| 8 Departure planner | ✅ Forecast-driven joint scenarios, climatology-anomaly scenarios beyond the horizon, trust horizon, window from one issue with support/trust flags | `forecasting/scenarios.py`, `forecasting/trust.py`, `routing/departure.py` |
+| 9 Replanning | ✅ Triggers, hysteresis, corridor alerts, stale-input flag, JSONL audit log, day-by-day replay | `routing/replan.py`, `replay.py` |
+| 10 Validation | ✅ MAE/RMSE/IIEE/Brier/reliability, single-voyage replay vs naive · ⏳ multi-season replay backtest | `validation/`, `replay.py` |
 | 11 Product | ✅ CLI, GeoJSON/CSV, figures · ⏳ FastAPI, dashboard | `cli.py`, `export.py`, `viz.py` |
 
 ---
@@ -148,6 +184,10 @@ src/antarctic_routing/
   preprocessing/            Stage 3 - EPSG:3031 grid, regridding, climatology, splits
   forecasting/              Stage 4 - baselines, U-Net, training, per-lead evaluation, calibration
   iceberg/drift.py          Stage 5 - drift physics, ensembles, presence layers, learned correction
+  forecasting/scenarios.py  Stage 8 - forecast-issued joint scenarios (observed / forecast / climatology layers)
+  forecasting/trust.py      Stage 8 - trust horizon (season-blocked bootstrap)
+  routing/replan.py         Stage 9 - replanning triggers, hysteresis, audit log
+  replay.py                 Stage 9/10 - day-by-day historical replay scored against observed ice
   synthetic.py              controlled-synthetic joint scenarios (schematic world)
   routing/                  Stages 6-8 - hazard, fuel, graph, A*, evaluation, candidates, departures
   validation/metrics.py     Stage 10 - MAE, RMSE, Brier, reliability
@@ -173,8 +213,8 @@ tests/                      hand-calculated values, behavioural routing worlds, 
 ## 🛣️ Roadmap
 
 1. **Phase 1 ✅** config, ingestion framework, harmonisation, baselines, hazard/fuel, router, departure sweep, exports.
-2. **Phase 2 ✅** OSI SAF reader, residual U-Net vs baselines per lead, calibrated probabilities, iceberg drift ensembles in route risk. *Pending:* first run on real OSI SAF/ERA5/CMEMS data, and wiring U-Net ensembles directly into the departure planner.
-3. **Phase 3:** climatology-anomaly scenarios beyond the forecast horizon, trust horizon (year-blocked bootstrap of skill vs baselines), voyage replanning and replay.
+2. **Phase 2 ✅** OSI SAF reader, residual U-Net vs baselines per lead, calibrated probabilities, iceberg drift ensembles in route risk. *Pending:* first run on real OSI SAF/ERA5/CMEMS data.
+3. **Phase 3 ✅** U-Net ensembles drive the router, climatology-anomaly scenarios beyond the horizon, trust horizon (season-blocked bootstrap), departure window from one forecast issue, replanning with an audit log, day-by-day replay.
 4. **Phase 4:** historical replay backtests vs shortest-path and fixed ice-edge-buffer baselines, fuel-sensitivity analysis, FastAPI + polar web map (OpenLayers, EPSG:3031), Docker.
 
 ## 📚 Related work

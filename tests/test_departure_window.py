@@ -47,3 +47,31 @@ def test_window_must_fit_inside_the_scenario_horizon():
 
     with pytest.raises(ValueError, match="horizon"):
         plan_from_issue(_window_world(), [6], _vessel(), A, B, risk_budget=0.05, risk_weights=[0])
+
+
+def test_departure_chart_legend_lists_climatology_only_when_present(tmp_path):
+    import matplotlib.pyplot as plt
+
+    import antarctic_routing.viz as viz
+
+    captured = {}
+    real_savefig = plt.Figure.savefig
+
+    def grab(fig, *a, **k):
+        captured["labels"] = [t.get_text() for t in fig.axes[0].get_legend().get_texts()]
+        captured["ylim"] = fig.axes[0].get_ylim()
+        return real_savefig(fig, *a, **k)
+
+    plt.Figure.savefig = grab
+    try:
+        sweep = plan_from_issue(_window_world(), [2], _vessel(), A, B, risk_budget=0.05, risk_weights=[0],
+                                n_scenario_routes=0)
+        viz.plot_departures(sweep, 0.05, tmp_path / "a.png", "t")
+        assert not any("climatology" in x for x in captured["labels"])
+        assert captured["ylim"][1] < 0.5            # small risks are not flattened against a 0-1 axis
+        sweep = plan_from_issue(_window_world(), [3], _vessel(), A, B, risk_budget=0.05, risk_weights=[0],
+                                n_scenario_routes=0)
+        viz.plot_departures(sweep, 0.05, tmp_path / "b.png", "t")
+        assert any("climatology" in x for x in captured["labels"])
+    finally:
+        plt.Figure.savefig = real_savefig
