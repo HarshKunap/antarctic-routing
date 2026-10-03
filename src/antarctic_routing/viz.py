@@ -141,3 +141,37 @@ def plot_departures(sweep: DepartureSweep, risk_budget: float, path: str | Path,
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
     return out
+
+
+_METHOD_STYLE = {
+    "persistence": ("#8a8f98", "--"),
+    "climatology": ("#c27c2c", ":"),
+    "damped_persistence": ("#4f86c6", "-."),
+}
+
+
+def plot_forecast_skill(report: dict, path: str | Path, title: str) -> Path:
+    """MAE and IIEE against lead time for the model and every baseline."""
+    leads = report["leads"]
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.2), dpi=130)
+    for method in report["methods"]:
+        colour, ls = _METHOD_STYLE.get(method, ("#d1495b", "-"))
+        lw = 2.6 if method not in _METHOD_STYLE else 1.5
+        axes[0].plot(leads, report["mae"][method], ls, color=colour, lw=lw, marker="o", ms=3, label=method)
+        axes[1].plot(leads, np.asarray(report["iiee_km2"][method]) / 1e3, ls, color=colour, lw=lw,
+                     marker="o", ms=3, label=method)
+    axes[0].set_ylabel("MAE (concentration fraction)")
+    axes[1].set_ylabel(f"IIEE (10^3 km^2, edge at C >= {report['edge_threshold']})")
+    for ax in axes:
+        ax.set_xlabel("lead time (days)")
+        ax.grid(alpha=0.3)
+        ax.set_xticks(leads)
+    axes[0].legend(fontsize=8)
+    fig.suptitle(f"{title}\n{report['execution_mode'].upper()} - test seasons {report['test_seasons']}, "
+                 f"{report['n_samples']} forecasts, rho={report['rho']:.3f}", fontsize=10)
+    fig.tight_layout()
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+    return out

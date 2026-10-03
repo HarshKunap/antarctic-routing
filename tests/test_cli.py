@@ -72,3 +72,19 @@ def test_fetch_sea_ice_reports_blocked_or_failed_without_network(tmp_path, monke
     assert rc == 1
     summary = json.loads((tmp_path / "sea_ice" / "fetch-summary.json").read_text())
     assert [r["status"] for r in summary["results"]] == ["failed", "failed"]
+
+
+def test_train_and_evaluate_forecast_on_synthetic_history(tmp_path):
+    common = ["--config", CONFIG, "--synthetic-seasons", "2010:2016", "--resolution-km", "50",
+              "--history-days", "5", "--lead-days", "3", "--n-val", "1", "--n-test", "1"]
+    rc = main(["train-forecast", *common, "--epochs", "2", "--base-channels", "8", "--out", str(tmp_path / "model")])
+    assert rc == 0
+    assert (tmp_path / "model" / "best.pt").is_file()
+    rc = main(["evaluate-forecast", *common, "--weights", str(tmp_path / "model" / "best.pt"),
+               "--out", str(tmp_path / "report")])
+    assert rc == 0
+    report = json.loads((tmp_path / "report" / "forecast_eval.json").read_text())
+    assert report["test_seasons"] == [2015] and report["execution_mode"] == "controlled_synthetic"
+    assert (tmp_path / "report" / "forecast_skill.png").is_file()
+    stage = json.loads((tmp_path / "report" / "stage-result.json").read_text())
+    assert stage["stage"] == "forecast_evaluation"

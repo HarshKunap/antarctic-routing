@@ -21,12 +21,14 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
 import numpy as np
+import xarray as xr
 from matplotlib.path import Path as MplPath
 from scipy.ndimage import gaussian_filter
 
 from antarctic_routing.config import ProjectConfig
 from antarctic_routing.preprocessing.climatology import day_of_season
 from antarctic_routing.preprocessing.grid import PolarGrid
+from antarctic_routing.preprocessing.harmonize import to_dataset
 
 # (lat, lon) vertices - schematic only.
 _TIERRA_DEL_FUEGO = [
@@ -206,3 +208,59 @@ def generate_synthetic(
         ),
         truth_conc=truth,
     )
+
+
+TONGUE_DRIFT_RAD_PER_DAY = 0.1745  # ~0.25 deg longitude per day, eastward with the ACC
+
+
+def synthetic_history(
+    cfg: ProjectConfig,
+    grid: PolarGrid,
+    seasons,
+    seed: int = 0,
+    noise: float = 0.05,
+) -> xr.Dataset:
+    """Multi-season daily "observed" concentration with learnable dynamics.
+
+    Each season (1 Nov - 28 Feb; 29 Feb is omitted so every season has 120
+    days) combines:
+
+    * the climatological retreating edge used by :func:`generate_synthetic`;
+    * a season anomaly in edge latitude following AR(1) with daily decay 0.97
+      (what damped anomaly persistence is designed to capture);
+    * ice tongues that drift eastward ~0.25 deg longitude per day (a translation
+      that persistence cannot capture but a convolutional model can learn);
+    * spatially coherent AR(1) noise.
+
+    Returns a dataset shaped like :func:`ingestion.osisaf_reader.build_sea_ice_dataset`
+    output, labelled ``controlled_synthetic``.
+    """
+    land = schematic_land_mask(grid)
+    lat, lon = grid.lat2d, grid.lon2d
+    smooth = 60_000.0 / grid.resolution_m
+    rng = np.random.default_rng(seed)
+    times, frames = [], []
+    for season in seasons:
+        start, end = date(season, 11, 1), date(season + 1, 2, 28)
+        offset = rng.normal(0.0, 0.33)
+        phase0 = rng.uniform(0.0, 2 * np.pi)
+        eta = np.zeros(lat.shape)
+        for k in range((end - start).days + 1):
+            day = start + timedelta(days=k)
+            offset = 0.97 * offset + rng.normal(0.0, 0.08)
+            xi = gaussian_filter(rng.normal(size=lat.shape), smooth)
+            eta = 0.9 * eta + 0.436 * xi / (xi.std() + 1e-12)
+            edge = _edge_latitude(k, lon) + _tongues(lon, phase0 - TONGUE_DRIFT_RAD_PER_DAY * k) + offset
+            c = 0.95 * _sigmoid((edge - lat) / 0.35)
+            c = np.clip(c + noise * eta * (0.3 + 2.8 * c * (1 - c)), 0.0, 1.0)
+            c[land] = np.nan
+            frames.append(c.astype(np.float32))
+            times.append(datetime(day.year, day.month, day.day))
+    ds = to_dataset(grid, times, ice_concentration=np.stack(frames),
+                    imputed_mask=np.zeros((len(frames), *grid.shape), bool), land_mask=land)
+    ds.attrs.update(
+        execution_mode="controlled_synthetic",
+        source_product="synthetic_history",
+        description=f"Schematic multi-season history, seasons={list(seasons)}, seed={seed}. Not real data.",
+    )
+    return ds

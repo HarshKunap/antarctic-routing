@@ -35,14 +35,20 @@ def damped_anomaly_persistence(
     return np.clip(clim.mean_for(target) + rho**lead_days * anomaly, 0.0, 1.0)
 
 
-def fit_anomaly_decay(anomalies: np.ndarray) -> float:
-    """Least-squares lag-1 decay ``rho`` from a daily anomaly sequence (T, ...).
+def fit_anomaly_decay(anomalies) -> float:
+    """Least-squares lag-1 decay ``rho`` from daily anomaly sequences.
 
-    rho = sum(A_t A_{t+1}) / sum(A_t^2), clipped to [0, 1]. Pass training-season
-    anomalies only.
+    rho = sum(A_t A_{t+1}) / sum(A_t^2), clipped to [0, 1]. ``anomalies`` is one
+    (T, ...) array or a list of them (one per contiguous segment, e.g. per
+    season) so that pairs never span a gap. Pass training-season anomalies only.
     """
-    a = np.asarray(anomalies, float)
-    x, y = a[:-1].ravel(), a[1:].ravel()
+    segments = anomalies if isinstance(anomalies, list | tuple) else [anomalies]
+    xs, ys = [], []
+    for seg in segments:
+        a = np.asarray(seg, float)
+        xs.append(a[:-1].ravel())
+        ys.append(a[1:].ravel())
+    x, y = np.concatenate(xs), np.concatenate(ys)
     ok = np.isfinite(x) & np.isfinite(y)
     denom = float(np.sum(x[ok] ** 2))
     if denom == 0:

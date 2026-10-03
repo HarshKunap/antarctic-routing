@@ -215,6 +215,75 @@ def cmd_build_dataset(args) -> int:
     return 0
 
 
+def _forecast_data(args):
+    """Load real harmonised data (--data) or generate a synthetic history; split seasons."""
+    import xarray as xr
+
+    from antarctic_routing.forecasting.dataset import issue_seasons
+    from antarctic_routing.preprocessing.climatology import chronological_split
+    from antarctic_routing.synthetic import synthetic_history
+
+    cfg = load_config(args.config)
+    if args.data:
+        ds = xr.load_dataset(args.data)
+    else:
+        a, b = (int(v) for v in args.synthetic_seasons.split(":"))
+        grid = PolarGrid.from_domain(cfg.domain, args.resolution_km or 25.0)
+        ds = synthetic_history(cfg, grid, range(a, b), seed=args.seed)
+    months = cfg.project.season_months
+    seasons = sorted({s for s in issue_seasons(ds, range(ds.sizes["time"]), months) if s is not None})
+    split = chronological_split(seasons, args.n_val, args.n_test)
+    return cfg, ds, months, split
+
+
+def cmd_train_forecast(args) -> int:
+    from antarctic_routing.forecasting.train import TrainConfig, train_unet
+
+    cfg, ds, months, split = _forecast_data(args)
+    tc = TrainConfig(history_days=args.history_days or cfg.forecast.history_days, lead_days=args.lead_days,
+                     epochs=args.epochs, base_channels=args.base_channels, seed=args.seed)
+    print(f"Training on seasons {split['train']}, validating on {split['val']} "
+          f"({ds.attrs.get('execution_mode', 'real')} data)")
+    result = train_unet(ds, split["train"], split["val"], months, tc, args.out)
+    for row in result.history:
+        print(f"  epoch {row['epoch']:3d}  train {row['train_loss']:.4f}  val MAE {row['val_mae']:.4f}")
+    print(f"Best epoch {result.best_epoch}; checkpoint {result.checkpoint}")
+    return 0
+
+
+def cmd_evaluate_forecast(args) -> int:
+    from antarctic_routing.forecasting.evaluate import evaluate_forecasts
+    from antarctic_routing.forecasting.train import load_model, unet_predictor
+    from antarctic_routing.viz import plot_forecast_skill
+
+    t0, started = time.time(), utc_now()
+    cfg, ds, months, split = _forecast_data(args)
+    model, meta = load_model(args.weights)
+    hd, ld = meta["train_config"]["history_days"], meta["train_config"]["lead_days"]
+    if set(meta["train_seasons"]) & set(split["test"]):
+        raise SystemExit("refusing to evaluate: checkpoint was trained on a test season")
+    report = evaluate_forecasts(ds, unet_predictor(model), split["train"], split["test"], hd, ld, months)
+    out = Path(args.out)
+    outputs = [write_json_artifact(out / "forecast_eval.json", report)]
+    outputs.append(plot_forecast_skill(report, out / "forecast_skill.png", "Sea-ice U-Net vs baselines"))
+    stage = StageResult(
+        stage="forecast_evaluation", status="passed", execution_mode=report["execution_mode"], software=SOFTWARE,
+        inputs=[file_record(Path(args.weights), "U-Net checkpoint")],
+        parameters={"history_days": hd, "lead_days": ld, "train_seasons": split["train"],
+                    "test_seasons": split["test"]},
+        outputs=[file_record(p, "forecast_evaluation") for p in outputs],
+        metrics={"mae": report["mae"], "skill_mae_vs": report["skill_mae_vs"]},
+        command=" ".join(["antroute", *args.argv]), started_at=started, finished_at=utc_now(),
+        duration_seconds=round(time.time() - t0, 3),
+    )
+    write_json_artifact(out / "stage-result.json", stage.to_dict())
+    header = "lead  " + "  ".join(f"{m[:12]:>12s}" for m in report["methods"])
+    print(header)
+    for i, h in enumerate(report["leads"]):
+        print(f"{h:4d}  " + "  ".join(f"{report['mae'][m][i]:12.4f}" for m in report["methods"]))
+    return 0
+
+
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="antroute", description=__doc__.splitlines()[0])
     p.add_argument("--version", action="version", version=f"antarctic-routing {__version__}")
@@ -257,6 +326,31 @@ def _parser() -> argparse.ArgumentParser:
     bd.add_argument("--out", default="data/processed/sea_ice.nc")
     bd.add_argument("--resolution-km", type=float, default=None)
     bd.set_defaults(func=cmd_build_dataset)
+
+    def forecast_common(sp):
+        sp.add_argument("--config", default=DEFAULT_CONFIG)
+        src = sp.add_mutually_exclusive_group()
+        src.add_argument("--data", default=None, help="harmonised NetCDF from build-dataset")
+        src.add_argument("--synthetic-seasons", default="2004:2024", help="start:end (end exclusive)")
+        sp.add_argument("--resolution-km", type=float, default=None)
+        sp.add_argument("--history-days", type=int, default=None)
+        sp.add_argument("--lead-days", type=int, default=7)
+        sp.add_argument("--n-val", type=int, default=3)
+        sp.add_argument("--n-test", type=int, default=3)
+        sp.add_argument("--seed", type=int, default=42)
+
+    tf = sub.add_parser("train-forecast", help="train the sea-ice U-Net")
+    forecast_common(tf)
+    tf.add_argument("--epochs", type=int, default=30)
+    tf.add_argument("--base-channels", type=int, default=16)
+    tf.add_argument("--out", default="models/unet")
+    tf.set_defaults(func=cmd_train_forecast)
+
+    ef = sub.add_parser("evaluate-forecast", help="score the U-Net against baselines per lead")
+    forecast_common(ef)
+    ef.add_argument("--weights", default="models/unet/best.pt")
+    ef.add_argument("--out", default="reports/forecast")
+    ef.set_defaults(func=cmd_evaluate_forecast)
     return p
 
 
