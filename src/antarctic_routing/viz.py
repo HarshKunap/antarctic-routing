@@ -252,7 +252,9 @@ def plot_trust_horizon(result: dict, path: str | Path, title: str) -> Path:
     h = result["trust_horizon_days"]
     if h:
         ax.axvspan(0.5, h + 0.5, color="#3a8f6b", alpha=0.08)
-        ax.text(h + 0.45, ax.get_ylim()[1] * 0.92, f"trusted up to {h} d", ha="right", color="#3a8f6b", fontsize=9)
+        limited = any(t["limited_by_max_lead"] for t in result["by_baseline"].values())
+        label = f"trusted >= {h} d (limit of evaluated leads)" if limited else f"trusted up to {h} d"
+        ax.text(h + 0.45, ax.get_ylim()[1] * 0.92, label, ha="right", color="#3a8f6b", fontsize=9)
     ax.set_xlabel("lead time (days)")
     ax.set_ylabel("MAE improvement over baseline")
     ax.set_xticks(result["leads"])
