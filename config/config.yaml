@@ -1,0 +1,53 @@
+# Antarctic Vessel Routing & Ice-Risk Forecasting System - scenario configuration.
+#
+# Every value here is an ILLUSTRATIVE ASSUMPTION for a research prototype.
+# None of it is a validated route or an operationally approved vessel profile.
+# See docs/ASSUMPTIONS.md for the justification and status of each value.
+
+project:
+  name: antarctic_route_planner
+  region: drake_passage_bransfield_strait
+  season_months: [11, 12, 1, 2]        # austral summer, Nov-Feb
+
+domain:
+  crs: "EPSG:3031"                     # Antarctic polar stereographic
+  lat_min: -66.0
+  lat_max: -55.0
+  lon_min: -72.0
+  lon_max: -52.0
+
+route:
+  # Explicit keys avoid the [lat, lon] vs GeoJSON [lon, lat] ambiguity.
+  origin: {lat: -56.3, lon: -66.0}       # Drake Passage, south of Cape Horn
+  destination: {lat: -63.0, lon: -59.0}  # central Bransfield Strait
+  departure_start: "2026-11-15"
+  departure_end: "2026-12-15"
+
+grid:
+  resolution_km: 10
+  time_step_hours: 24
+
+forecast:
+  history_days: 14
+  lead_days: 21
+  ensemble_size: 20          # ML / forcing ensemble members
+  route_scenarios: 200       # joint scenarios used to evaluate route risk
+
+vessel:
+  name: "generic_polar_research_vessel"
+  ice_class: "REPLACE_WITH_VERIFIED_CLASS"
+  cruise_speed_knots: 12
+  max_ice_concentration: 0.15         # placeholder limit tau_v (fraction 0-1)
+  ice_speed_reduction: 0.7            # speed factor = 1 - k*C (assumption)
+  min_speed_knots: 3
+
+routing:
+  risk_budget: 0.05
+  risk_definition: "probability_of_any_defined_breach"
+  risk_estimator: "wilson_upper"      # or "point"
+  confidence: 0.95
+  fuel_model: "relative_index_v1"
+  fuel_penalty_lambda: 4.0
+  fuel_penalty: "quadratic"           # or "piecewise"
+  connectivity: 16                    # 8 or 16 neighbour moves
+  risk_weights: [0, 10, 100, 1000]    # penalty sweep for candidate generation
