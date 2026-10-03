@@ -353,3 +353,42 @@ def plot_replay(result: dict, ctx, tau: float, path: str | Path, title: str) -> 
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
     return out
+
+
+def plot_backtest(result: dict, path: str | Path, title: str) -> Path:
+    """Per-method comparison: breach rate, hazard hours, elapsed time, fuel."""
+    methods = ["planner", "naive", "ice_edge_buffer"]
+    labels = {"planner": "this system", "naive": "naive (leave day 1,\nshortest route)",
+              "ice_edge_buffer": f"ice-edge buffer\n({result['buffer_km']:g} km, no replan)"}
+    colours = {"planner": "#d1495b", "naive": "#8a8f98", "ice_edge_buffer": "#4f86c6"}
+    panels = [("breach_rate", "voyages meeting observed ice >= tau", 100.0, "%"),
+              ("mean_hazard_hours", "hours in observed hazardous ice", 1.0, "h"),
+              ("mean_elapsed_hours", "start-to-arrival time (wait + sail)", 1 / 24.0, "days"),
+              ("mean_fuel_index", "fuel index (sailing only)", 1.0, "")]
+    fig, axes = plt.subplots(1, 4, figsize=(15, 4.3), dpi=120)
+    for ax, (key, name, scale, unit) in zip(axes, panels, strict=True):
+        vals = [result["summary"][m][key] for m in methods]
+        vals = [v * scale if v is not None else 0.0 for v in vals]
+        bars = ax.bar([labels[m] for m in methods], vals, color=[colours[m] for m in methods])
+        for b, v in zip(bars, vals, strict=True):
+            ax.text(b.get_x() + b.get_width() / 2, b.get_height(), f"{v:.1f}{unit}", ha="center", va="bottom",
+                    fontsize=8)
+        ax.set_title(name, fontsize=9)
+        ax.tick_params(axis="x", labelsize=7)
+        ax.set_ylim(0, max(vals + [1e-9]) * 1.2 or 1)
+    rc = result["planner_risk_check"]
+    n = result["summary"]["planner"]["n"]
+    note = ""
+    if rc["n_departures"]:
+        note = (f"planner: mean predicted P(breach) {rc['mean_predicted_p_breach']:.1%} "
+                f"(upper bound {rc['mean_predicted_upper_bound']:.1%}) vs realised {rc['realised_breach_rate']:.0%} "
+                f"over {rc['n_departures']} departures")
+    fig.suptitle(f"{title}\n{result['execution_mode'].upper()} - {n} start dates in held-out seasons. {note}",
+                 fontsize=10)
+    fig.tight_layout()
+    fig.text(0.01, -0.02, DISCLAIMER, fontsize=6, color="#555")
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+    return out

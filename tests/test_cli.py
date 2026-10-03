@@ -178,3 +178,19 @@ def test_replay_cli_writes_log_figure_and_summary(tmp_path):
     assert summary["start"] == "2015-11-20" and "truth" in summary
     assert (tmp_path / "r" / "audit.jsonl").is_file()
     assert (tmp_path / "r" / "replay.png").is_file()
+
+
+def test_backtest_cli_writes_summary_table_and_figure(tmp_path):
+    common = ["--config", CONFIG, "--synthetic-seasons", "2010:2016", "--resolution-km", "50",
+              "--history-days", "5", "--lead-days", "3", "--n-val", "1", "--n-test", "1"]
+    assert main(["train-forecast", *common, "--epochs", "1", "--base-channels", "8",
+                 "--out", str(tmp_path / "model")]) == 0
+    rc = main(["backtest", *common, "--weights", str(tmp_path / "model" / "best.pt"),
+               "--start-days", "11-18", "12-02", "--window-days", "4", "--members", "80",
+               "--out", str(tmp_path / "b")])
+    assert rc == 0
+    out = json.loads((tmp_path / "b" / "backtest.json").read_text())
+    assert out["starts"] == ["2015-11-18", "2015-12-02"]          # test season only
+    assert set(out["summary"]) == {"planner", "naive", "ice_edge_buffer"}
+    assert (tmp_path / "b" / "backtest.png").is_file()
+    assert (tmp_path / "b" / "backtest_voyages.csv").is_file()

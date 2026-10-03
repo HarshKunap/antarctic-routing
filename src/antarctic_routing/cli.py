@@ -461,6 +461,49 @@ def cmd_replay(args) -> int:
     return 0
 
 
+def cmd_backtest(args) -> int:
+    import csv
+
+    from antarctic_routing.forecasting.scenarios import grid_of
+    from antarctic_routing.routing.replan import ReplanPolicy
+    from antarctic_routing.validation.backtest import run_backtest
+    from antarctic_routing.viz import plot_backtest
+
+    cfg, ds, months, split = _forecast_data(args)
+    ctx, meta = _forecast_context(args, ds, months, split)
+    seasons = args.seasons or split["test"]
+    starts = []
+    for s in seasons:
+        for md in args.start_days:
+            m, d = (int(v) for v in md.split("-"))
+            starts.append(date(s if m >= months[0] else s + 1, m, d))
+    grid = grid_of(ds)
+    o = grid.cell_of(cfg.route.origin.lat, cfg.route.origin.lon)
+    dst = grid.cell_of(cfg.route.destination.lat, cfg.route.destination.lon)
+    policy = ReplanPolicy(cfg.routing.risk_budget, cfg.routing.risk_estimator, cfg.routing.confidence)
+    result = run_backtest(ctx, VesselModel.from_config(cfg), o, dst, starts, args.window_days, args.max_wait_days,
+                          args.members, policy, cfg.routing.risk_weights, _horizon_days(cfg),
+                          buffer_km=args.buffer_km, seed=args.seed, scenario_routes=args.scenario_routes,
+                          connectivity=cfg.routing.connectivity)
+    out = Path(args.out)
+    write_json_artifact(out / "backtest.json", result)
+    with (out / "backtest_voyages.csv").open("w", newline="") as fh:
+        cols = ["start", "season", "method", "departure", "days_waited", "breached", "observed_breach_cells",
+                "hazard_hours", "sail_hours", "elapsed_hours", "fuel_index"]
+        w = csv.DictWriter(fh, fieldnames=cols, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(result["voyages"])
+    plot_backtest(result, out / "backtest.png", "Replay backtest vs baselines")
+    print(f"{'method':16s} {'n':>3s} {'breach%':>8s} {'hazard h':>9s} {'wait d':>7s} {'elapsed h':>10s} {'fuel':>7s}")
+    for m, sm in result["summary"].items():
+        def f(v, fmt):
+            return format(v, fmt) if v is not None else "-"
+        print(f"{m:16s} {sm['n']:3d} {f(None if sm['breach_rate'] is None else 100 * sm['breach_rate'], '8.0f')} "
+              f"{f(sm['mean_hazard_hours'], '9.1f')} {f(sm['mean_days_waited'], '7.1f')} "
+              f"{f(sm['mean_elapsed_hours'], '10.1f')} {f(sm['mean_fuel_index'], '7.0f')}")
+    return 0
+
+
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="antroute", description=__doc__.splitlines()[0])
     p.add_argument("--version", action="version", version=f"antarctic-routing {__version__}")
@@ -573,6 +616,19 @@ def _parser() -> argparse.ArgumentParser:
     rp.add_argument("--trust-report", default=None)
     rp.add_argument("--out", default="reports/replay")
     rp.set_defaults(func=cmd_replay)
+
+    bt = sub.add_parser("backtest", help="multi-season replay backtest vs naive and ice-edge-buffer baselines")
+    forecast_common(bt)
+    bt.add_argument("--weights", default="models/unet/best.pt")
+    bt.add_argument("--seasons", type=int, nargs="*", default=None, help="default: the held-out test seasons")
+    bt.add_argument("--start-days", nargs="+", default=["11-10", "11-20", "12-01", "12-10"], help="MM-DD")
+    bt.add_argument("--window-days", type=int, default=7)
+    bt.add_argument("--max-wait-days", type=int, default=40)
+    bt.add_argument("--members", type=int, default=120)
+    bt.add_argument("--buffer-km", type=float, default=50.0)
+    bt.add_argument("--scenario-routes", type=int, default=0)
+    bt.add_argument("--out", default="reports/backtest")
+    bt.set_defaults(func=cmd_backtest)
     return p
 
 

@@ -67,17 +67,23 @@ def _sail(route: Route, ctx: ForecastContext, day: date, vessel: VesselModel, ho
     return route.cells[1: last + 1], last == len(route.cells) - 1
 
 
-def _score(cells: list[tuple[int, int]], ctx: ForecastContext, day: date, vessel: VesselModel) -> dict:
+def score_track(cells: list[tuple[int, int]], ctx: ForecastContext, day: date, vessel: VesselModel) -> dict:
+    """Sail ``cells`` from ``day`` through observed ice and measure the exposure."""
     route = Route("sailed", cells, [0.0] * len(cells), float("nan"), 0.0)
     ev = evaluate_route(route, _truth_world(ctx, day, 6), vessel)
-    hits = [cells[i] for i, p in enumerate(ev.segment_breach_prob) if p > 0]
+    arrivals = ev.scenario_arrival_hours[0]
+    hit = [p > 0 for p in ev.segment_breach_prob]
+    hazard_hours = sum(arrivals[i] - arrivals[i - 1] for i in range(1, len(cells))
+                       if hit[i] and np.isfinite(arrivals[i]))
     return {
         "departure": day.isoformat(),
         "hours": ev.expected_hours,
+        "sail_hours": ev.expected_hours,
         "fuel_index": ev.expected_fuel,
         "distance_km": ev.distance_km,
-        "observed_breach_cells": len(hits),
-        "breached": bool(hits),
+        "observed_breach_cells": int(sum(hit)),
+        "hazard_hours": float(hazard_hours),
+        "breached": bool(any(hit)),
     }
 
 
@@ -121,7 +127,8 @@ def run_replay(
         go = sel is not None and sel.lead_days == 0
         log({"day": day.isoformat(), "phase": "port", "action": "depart" if go else "wait",
              "recommended_departure": sel.departure.isoformat() if sel else None,
-             "p_breach_upper": sel.p_breach_upper if sel else None, "explanation": sweep.explanation})
+             "p_breach": sel.p_breach if sel else None, "p_breach_upper": sel.p_breach_upper if sel else None,
+             "explanation": sweep.explanation})
         if go:
             route, departed = sel.plan.recommended.route, day
             break
@@ -159,6 +166,6 @@ def run_replay(
     result["arrival_day"] = day.isoformat() if result["arrived"] else None
     result["sailed_cells"] = [list(c) for c in sailed]
     result["naive_cells"] = [list(c) for c in naive.cells]
-    result["truth"] = {"planner": _score(sailed, ctx, departed, vessel),
-                       "naive": _score(naive.cells, ctx, start, vessel)}
+    result["truth"] = {"planner": score_track(sailed, ctx, departed, vessel),
+                       "naive": score_track(naive.cells, ctx, start, vessel)}
     return result
