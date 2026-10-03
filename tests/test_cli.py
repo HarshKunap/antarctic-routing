@@ -194,3 +194,12 @@ def test_backtest_cli_writes_summary_table_and_figure(tmp_path):
     assert set(out["summary"]) == {"planner", "naive", "ice_edge_buffer"}
     assert (tmp_path / "b" / "backtest.png").is_file()
     assert (tmp_path / "b" / "backtest_voyages.csv").is_file()
+
+
+def test_sensitivity_cli_writes_grid_and_heatmap(tmp_path):
+    rc = main(["sensitivity", "--config", CONFIG, "--departure", "2026-12-20", *FAST,
+               "--lambdas", "0", "4", "--ks", "0.5", "0.7", "--out", str(tmp_path)])
+    assert rc == 0
+    out = json.loads((tmp_path / "sensitivity.json").read_text())
+    assert len(out["grid"]) == 4 and out["baseline"]["lambda"] == 4.0
+    assert (tmp_path / "sensitivity.png").is_file()

@@ -392,3 +392,42 @@ def plot_backtest(result: dict, path: str | Path, title: str) -> Path:
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
     return out
+
+
+def plot_sensitivity(result: dict, path: str | Path, title: str) -> Path:
+    """Heatmaps over (lambda, k): route deviation from the baseline and expected fuel."""
+    lams = sorted({r["lambda"] for r in result["grid"]})
+    ks = sorted({r["k"] for r in result["grid"]})
+    dev = np.full((len(lams), len(ks)), np.nan)
+    fuel = np.full_like(dev, np.nan)
+    for r in result["grid"]:
+        i, j = lams.index(r["lambda"]), ks.index(r["k"])
+        dev[i, j] = r["deviation_km"] if r["deviation_km"] is not None else np.nan
+        fuel[i, j] = r["expected_fuel"] if r["expected_fuel"] is not None else np.nan
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.3), dpi=120)
+    for ax, data, name, cmap in ((axes[0], dev, "route deviation from baseline (km)", "Reds"),
+                                 (axes[1], fuel, "expected fuel index", "Oranges")):
+        im = ax.imshow(data, cmap=cmap, aspect="auto", origin="lower")
+        for i in range(len(lams)):
+            for j in range(len(ks)):
+                if np.isfinite(data[i, j]):
+                    ax.text(j, i, f"{data[i, j]:.0f}", ha="center", va="center", fontsize=8)
+        ax.set_xticks(range(len(ks)), [f"{k:g}" for k in ks])
+        ax.set_yticks(range(len(lams)), [f"{v:g}" for v in lams])
+        ax.set_xlabel("speed-in-ice factor k")
+        ax.set_ylabel("fuel penalty lambda")
+        ax.set_title(name, fontsize=9)
+        b = result["baseline"]
+        if b["lambda"] in lams and b["k"] in ks:
+            ax.add_patch(plt.Rectangle((ks.index(b["k"]) - 0.5, lams.index(b["lambda"]) - 0.5), 1, 1,
+                                       fill=False, ec="black", lw=2))
+        fig.colorbar(im, ax=ax, fraction=0.046)
+    fig.suptitle(f"{title}\n{result['execution_mode'].upper()} - recommendation unchanged in "
+                 f"{result['stable_fraction']:.0%} of settings (route moves > {result['change_threshold_km']:g} km "
+                 "counts as changed); black box = configured assumption", fontsize=10)
+    fig.tight_layout()
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+    return out

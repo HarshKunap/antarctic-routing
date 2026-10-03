@@ -504,6 +504,26 @@ def cmd_backtest(args) -> int:
     return 0
 
 
+def cmd_sensitivity(args) -> int:
+    from antarctic_routing.validation.sensitivity import run_sensitivity
+    from antarctic_routing.viz import plot_sensitivity
+
+    cfg, grid, n_scen, o, d = _setup(args)
+    dep = args.departure or cfg.route.departure_start
+    world = generate_synthetic(cfg, grid, dep, _horizon_days(cfg), n_scen, seed=args.seed)
+    result = run_sensitivity(world, VesselModel.from_config(cfg), o, d, args.lambdas, args.ks,
+                             cfg.routing.risk_budget, cfg.routing.risk_weights, cfg.routing.risk_estimator,
+                             cfg.routing.connectivity)
+    out = Path(args.out)
+    write_json_artifact(out / "sensitivity.json", result)
+    plot_sensitivity(result, out / "sensitivity.png", f"Fuel/speed assumption sensitivity, departure {dep}")
+    print(f"Recommendation unchanged in {result['stable_fraction']:.0%} of {len(result['grid'])} settings")
+    for r in result["grid"]:
+        if r["route_changed"]:
+            print(f"  changes at lambda={r['lambda']:g}, k={r['k']:g} (moves {r['deviation_km'] or 0:.0f} km)")
+    return 0
+
+
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="antroute", description=__doc__.splitlines()[0])
     p.add_argument("--version", action="version", version=f"antarctic-routing {__version__}")
@@ -621,7 +641,8 @@ def _parser() -> argparse.ArgumentParser:
     forecast_common(bt)
     bt.add_argument("--weights", default="models/unet/best.pt")
     bt.add_argument("--seasons", type=int, nargs="*", default=None, help="default: the held-out test seasons")
-    bt.add_argument("--start-days", nargs="+", default=["11-10", "11-20", "12-01", "12-10"], help="MM-DD")
+    bt.add_argument("--start-days", nargs="+", default=["11-15", "11-25", "12-05", "12-15"],
+                    help="MM-DD; needs history-days of in-season data before each start")
     bt.add_argument("--window-days", type=int, default=7)
     bt.add_argument("--max-wait-days", type=int, default=40)
     bt.add_argument("--members", type=int, default=120)
@@ -629,6 +650,13 @@ def _parser() -> argparse.ArgumentParser:
     bt.add_argument("--scenario-routes", type=int, default=0)
     bt.add_argument("--out", default="reports/backtest")
     bt.set_defaults(func=cmd_backtest)
+
+    se = sub.add_parser("sensitivity", help="does the recommendation change with fuel/speed assumptions?")
+    common(se, "reports/sensitivity")
+    se.add_argument("--departure", type=date.fromisoformat, default=None)
+    se.add_argument("--lambdas", type=float, nargs="+", default=[0, 1, 2, 4, 8, 16, 32])
+    se.add_argument("--ks", type=float, nargs="+", default=[0.3, 0.5, 0.7, 0.9])
+    se.set_defaults(func=cmd_sensitivity)
     return p
 
 
