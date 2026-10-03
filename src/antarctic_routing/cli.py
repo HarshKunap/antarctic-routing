@@ -284,6 +284,32 @@ def cmd_evaluate_forecast(args) -> int:
     return 0
 
 
+def cmd_calibrate_forecast(args) -> int:
+    from antarctic_routing.forecasting.calibration import evaluate_probabilities
+    from antarctic_routing.forecasting.train import load_model, unet_predictor
+    from antarctic_routing.viz import plot_reliability
+
+    cfg, ds, months, split = _forecast_data(args)
+    model, meta = load_model(args.weights)
+    if set(meta["train_seasons"]) & (set(split["val"]) | set(split["test"])):
+        raise SystemExit("refusing to calibrate: checkpoint was trained on a validation/test season")
+    tc = meta["train_config"]
+    report = evaluate_probabilities(
+        ds, unet_predictor(model), split["train"], split["val"], split["test"], tc["history_days"],
+        tc["lead_days"], months, tau=cfg.vessel.max_ice_concentration, n_members=args.members, seed=args.seed,
+    )
+    out = Path(args.out)
+    write_json_artifact(out / "calibrator.json", {**report["calibrator"], "tau": report["tau"],
+                                                  "weights_sha256": sha256_file(Path(args.weights))})
+    write_json_artifact(out / "probability_eval.json", report)
+    plot_reliability(report, out / "reliability.png", "Sea-ice hazard probability calibration")
+    print("lead   Brier raw   calibrated   climatology")
+    for i, h in enumerate(report["leads"]):
+        print(f"{h:4d}  {report['brier']['raw'][i]:10.4f}  {report['brier']['calibrated'][i]:11.4f}"
+              f"  {report['brier']['climatology'][i]:12.4f}")
+    return 0
+
+
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="antroute", description=__doc__.splitlines()[0])
     p.add_argument("--version", action="version", version=f"antarctic-routing {__version__}")
@@ -351,6 +377,13 @@ def _parser() -> argparse.ArgumentParser:
     ef.add_argument("--weights", default="models/unet/best.pt")
     ef.add_argument("--out", default="reports/forecast")
     ef.set_defaults(func=cmd_evaluate_forecast)
+
+    cf = sub.add_parser("calibrate-forecast", help="ensemble probabilities + isotonic calibration")
+    forecast_common(cf)
+    cf.add_argument("--weights", default="models/unet/best.pt")
+    cf.add_argument("--members", type=int, default=20)
+    cf.add_argument("--out", default="reports/calibration")
+    cf.set_defaults(func=cmd_calibrate_forecast)
     return p
 
 

@@ -88,3 +88,17 @@ def test_train_and_evaluate_forecast_on_synthetic_history(tmp_path):
     assert (tmp_path / "report" / "forecast_skill.png").is_file()
     stage = json.loads((tmp_path / "report" / "stage-result.json").read_text())
     assert stage["stage"] == "forecast_evaluation"
+
+
+def test_calibrate_forecast_writes_report_calibrator_and_reliability_plot(tmp_path):
+    common = ["--config", CONFIG, "--synthetic-seasons", "2010:2016", "--resolution-km", "50",
+              "--history-days", "5", "--lead-days", "3", "--n-val", "1", "--n-test", "1"]
+    assert main(["train-forecast", *common, "--epochs", "1", "--base-channels", "8",
+                 "--out", str(tmp_path / "model")]) == 0
+    rc = main(["calibrate-forecast", *common, "--weights", str(tmp_path / "model" / "best.pt"),
+               "--members", "8", "--out", str(tmp_path / "cal")])
+    assert rc == 0
+    report = json.loads((tmp_path / "cal" / "probability_eval.json").read_text())
+    assert report["val_seasons"] == [2014] and report["test_seasons"] == [2015]
+    assert json.loads((tmp_path / "cal" / "calibrator.json").read_text())["leads"] == [1, 2, 3]
+    assert (tmp_path / "cal" / "reliability.png").is_file()

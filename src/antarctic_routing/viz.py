@@ -175,3 +175,38 @@ def plot_forecast_skill(report: dict, path: str | Path, title: str) -> Path:
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
     return out
+
+
+def plot_reliability(report: dict, path: str | Path, title: str) -> Path:
+    """Reliability diagram (raw vs calibrated vs climatology) and Brier score per lead."""
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.4), dpi=130)
+    styles = {"raw": ("#8a8f98", "o--"), "calibrated": ("#d1495b", "o-"), "climatology": ("#c27c2c", "s:")}
+    ax = axes[0]
+    ax.plot([0, 1], [0, 1], color="black", lw=0.8, alpha=0.6, label="perfect reliability")
+    for name, (colour, fmt) in styles.items():
+        rows = [r for r in report["reliability"][name] if r["count"]]
+        ax.plot([r["mean_predicted"] for r in rows], [r["observed_frequency"] for r in rows], fmt,
+                color=colour, ms=4, label=name)
+    ax.set_xlabel("forecast probability")
+    ax.set_ylabel("observed frequency")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.set_aspect("equal")
+    ax.legend(fontsize=8)
+    ax.set_title(f"Reliability, P(C >= {report['tau']}) pooled over leads", fontsize=9)
+    ax = axes[1]
+    for name, (colour, fmt) in styles.items():
+        ax.plot(report["leads"], report["brier"][name], fmt, color=colour, ms=4, label=name)
+    ax.set_xlabel("lead time (days)")
+    ax.set_ylabel("Brier score (lower is better)")
+    ax.set_xticks(report["leads"])
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8)
+    fig.suptitle(f"{title}\n{report['execution_mode'].upper()} - calibrated on {report['val_seasons']}, "
+                 f"tested on {report['test_seasons']}, {report['n_members']} members", fontsize=10)
+    fig.tight_layout()
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+    return out
