@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Antarctic Ice-Risk Routing</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="viz-root">
+  <header class="topbar">
+    <div>
+      <h1>Antarctic Ice-Risk Routing</h1>
+      <p class="sub">Risk-budgeted route &amp; departure planning under forecast uncertainty</p>
+    </div>
+    <div class="badges">
+      <span class="badge" id="mode-badge">CONTROLLED-SYNTHETIC DATA</span>
+      <span class="badge muted" id="version-badge">v?</span>
+    </div>
+  </header>
+  <p class="disclaimer" id="disclaimer"></p>
+
+  <nav class="tabs" role="tablist">
+    <button role="tab" aria-selected="true" data-tab="plan">Route plan</button>
+    <button role="tab" aria-selected="false" data-tab="window">Departure window</button>
+    <button role="tab" aria-selected="false" data-tab="voyage">Voyage &amp; replanning</button>
+    <button role="tab" aria-selected="false" data-tab="validation">Validation</button>
+  </nav>
+
+  <!-- ===================== PLAN ===================== -->
+  <section class="tab" id="tab-plan">
+    <form class="controls" id="plan-form">
+      <label>Departure <input type="date" name="departure" value="2026-12-24" required></label>
+      <label>Scenarios <input type="number" name="scenarios" value="200" min="1" max="1000"></label>
+      <label>Grid
+        <select name="resolution_km"><option value="25">25 km (fast)</option><option value="10">10 km</option></select>
+      </label>
+      <label class="check"><input type="checkbox" name="berg"> Tracked iceberg</label>
+      <label>Berg lat <input type="number" name="berg_lat" value="-60.2" step="0.1"></label>
+      <label>Berg lon <input type="number" name="berg_lon" value="-62.6" step="0.1"></label>
+      <button type="submit" class="primary" id="plan-btn">Plan routes</button>
+      <span class="status" id="plan-status" role="status"></span>
+    </form>
+    <div class="grid2">
+      <div class="card map-card">
+        <div class="card-head">
+          <h2>Candidate routes over P(ice ≥ vessel limit)</h2>
+          <div class="legend" id="map-legend"></div>
+        </div>
+        <canvas id="map" width="760" height="640" aria-label="Polar route map"></canvas>
+        <div class="tooltip" id="map-tip" hidden></div>
+        <div class="ramp"><span>0%</span><div class="ramp-bar"></div><span>100% P(ice ≥ limit)</span></div>
+      </div>
+      <div class="card">
+        <h2>Recommendation</h2>
+        <p class="verdict" id="verdict">Plan a route to see the recommendation.</p>
+        <h3>Candidates (evaluated on the same joint scenarios)</h3>
+        <div class="table-wrap"><table class="data" id="cand-table">
+          <thead><tr><th></th><th>Route</th><th>Status</th><th class="num">km</th><th class="num">E[h]</th>
+            <th class="num">E[fuel]</th><th class="num">P(breach)</th><th class="num">95% UB</th></tr></thead>
+          <tbody></tbody>
+        </table></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== WINDOW ===================== -->
+  <section class="tab" id="tab-window" hidden>
+    <form class="controls" id="window-form">
+      <label>From <input type="date" name="start" value="2026-11-26" required></label>
+      <label>To <input type="date" name="end" value="2027-01-05" required></label>
+      <label>Step (days) <input type="number" name="step_days" value="3" min="1"></label>
+      <label>Scenarios <input type="number" name="scenarios" value="120" min="1"></label>
+      <button type="submit" class="primary">Sweep departures</button>
+      <span class="status" id="window-status" role="status"></span>
+    </form>
+    <div class="card">
+      <h2>95% upper bound on P(breach) by departure date</h2>
+      <p class="verdict" id="window-verdict"></p>
+      <canvas id="window-chart" width="1100" height="320" aria-label="Departure window chart"></canvas>
+      <div class="tooltip" id="window-tip" hidden></div>
+      <details><summary>Table view</summary>
+        <div class="table-wrap"><table class="data" id="window-table">
+          <thead><tr><th>Departure</th><th>Status</th><th class="num">95% UB</th><th class="num">E[h]</th>
+            <th class="num">E[fuel]</th></tr></thead><tbody></tbody></table></div>
+      </details>
+    </div>
+  </section>
+
+  <!-- ===================== VOYAGE ===================== -->
+  <section class="tab" id="tab-voyage" hidden>
+    <div class="grid2">
+      <div class="card">
+        <h2>Voyage</h2>
+        <form class="controls stacked" id="voyage-form">
+          <label>Departure <input type="date" name="departure" value="2027-01-10" required></label>
+          <button type="submit" class="primary">Create voyage</button>
+        </form>
+        <form class="controls stacked" id="replan-form">
+          <label>Vessel at waypoint <input type="range" name="wp" min="0" max="0" value="0" id="wp-slider">
+            <output id="wp-out">–</output></label>
+          <label>Forecast issued <input type="date" name="issued" value="2027-01-11"></label>
+          <label>Data age (h) <input type="number" name="age" value="6" min="0"></label>
+          <button type="submit" id="replan-btn" disabled>Replan from here</button>
+        </form>
+        <p class="status" id="voyage-status" role="status"></p>
+        <p><a id="export-geojson" href="#" hidden>Export GeoJSON</a> · <a id="export-csv" href="#" hidden>Export CSV</a></p>
+      </div>
+      <div class="card">
+        <h2>Decision log (audit)</h2>
+        <ol class="log" id="voyage-log"></ol>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== VALIDATION ===================== -->
+  <section class="tab" id="tab-validation" hidden>
+    <p class="sub">Figures produced by the CLI (<code>evaluate-forecast</code>, <code>calibrate-forecast</code>,
+      <code>trust-horizon</code>, <code>replay</code>, <code>backtest</code>, <code>sensitivity</code>).</p>
+    <div class="figs" id="figs"></div>
+  </section>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>

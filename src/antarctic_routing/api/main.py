@@ -48,6 +48,19 @@ from antarctic_routing.routing.replan import ReplanPolicy, replan
 from antarctic_routing.synthetic import ScenarioSet, generate_synthetic
 
 DASHBOARD_DIR = Path(__file__).resolve().parent.parent / "dashboard"
+FIGURE_CAPTIONS = {
+    "backtest": "Replay backtest vs naive and ice-edge-buffer baselines (held-out seasons)",
+    "replay": "Day-by-day voyage replay: departure advice and sailed track vs observed ice",
+    "departure_window": "Departure window from one forecast issue",
+    "trust_horizon": "Forecast trust horizon (season-blocked bootstrap)",
+    "forecast_skill": "U-Net vs baselines: MAE and ice-edge error by lead time",
+    "reliability": "Probability calibration: reliability and Brier score",
+    "sensitivity": "Fuel/speed assumption sensitivity",
+    "route_map_iceberg": "Iceberg drift ensemble forcing a detour",
+    "route_map": "Recommended route under the risk budget",
+    "route_map_infeasible": "Infeasible departure: destination iced in",
+    "departure_chart": "Departure sweep with fresh scenarios per date",
+}
 
 
 class Berg(BaseModel):
@@ -334,6 +347,21 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
                         DISCLAIMER])
         return Response(buf.getvalue(), media_type="text/csv",
                         headers={"Content-Disposition": f"attachment; filename=voyage_{vid}.csv"})
+
+    figures_dir = Path(os.environ.get("ANTROUTE_FIGURES", svc.config_path.resolve().parent.parent / "docs" / "images"))
+
+    @app.get("/figures")
+    def figures():
+        if not figures_dir.is_dir():
+            return {"figures": []}
+        order = list(FIGURE_CAPTIONS)
+        rank = {name: i for i, name in enumerate(order)}
+        files = sorted(figures_dir.glob("*.png"), key=lambda p: (rank.get(p.stem, 99), p.stem))
+        return {"figures": [{"url": f"/figures/{p.name}", "caption": FIGURE_CAPTIONS.get(p.stem, p.stem)}
+                            for p in files]}
+
+    if figures_dir.is_dir():
+        app.mount("/figures", StaticFiles(directory=figures_dir), name="figures")
 
     if DASHBOARD_DIR.is_dir():
         app.mount("/static", StaticFiles(directory=DASHBOARD_DIR), name="static")

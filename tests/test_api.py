@@ -120,3 +120,17 @@ def test_voyage_is_refused_when_no_route_meets_the_budget(client):
     r = client.post("/voyages", json={**FAST, "departure": "2026-11-20"})
     assert r.status_code == 409
     assert "risk budget" in r.json()["detail"]
+
+
+def test_dashboard_page_and_assets_are_served(client):
+    page = client.get("/")
+    assert page.status_code == 200 and "Antarctic Ice-Risk Routing" in page.text
+    assert client.get("/static/app.js").status_code == 200
+    assert client.get("/static/style.css").status_code == 200
+
+
+def test_figures_endpoint_lists_validation_images(client):
+    figs = client.get("/figures").json()["figures"]
+    assert figs and all(f["url"].startswith("/figures/") for f in figs)
+    assert client.get(figs[0]["url"]).status_code == 200
+    assert any("backtest" in f["url"] for f in figs)
