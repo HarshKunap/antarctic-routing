@@ -524,6 +524,16 @@ def cmd_sensitivity(args) -> int:
     return 0
 
 
+def cmd_serve(args) -> int:
+    import uvicorn
+
+    from antarctic_routing.api.main import create_app
+
+    print(f"Serving dashboard and API on http://{args.host}:{args.port}  (docs: /docs)")
+    uvicorn.run(create_app(args.config), host=args.host, port=args.port, log_level="info")
+    return 0
+
+
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="antroute", description=__doc__.splitlines()[0])
     p.add_argument("--version", action="version", version=f"antarctic-routing {__version__}")
@@ -657,6 +667,12 @@ def _parser() -> argparse.ArgumentParser:
     se.add_argument("--lambdas", type=float, nargs="+", default=[0, 1, 2, 4, 8, 16, 32])
     se.add_argument("--ks", type=float, nargs="+", default=[0.3, 0.5, 0.7, 0.9])
     se.set_defaults(func=cmd_sensitivity)
+
+    sv = sub.add_parser("serve", help="run the API and dashboard")
+    sv.add_argument("--config", default=DEFAULT_CONFIG)
+    sv.add_argument("--host", default="127.0.0.1")
+    sv.add_argument("--port", type=int, default=8000)
+    sv.set_defaults(func=cmd_serve)
     return p
 
 

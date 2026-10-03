@@ -24,7 +24,8 @@ dependencies = [
 [project.optional-dependencies]
 ingest = ["requests>=2.31", "cdsapi>=0.7", "copernicusmarine>=1.0", "netCDF4>=1.6"]
 ml = ["torch>=2.2"]
-dev = ["pytest>=8.0", "ruff>=0.6", "netCDF4>=1.6"]
+api = ["fastapi>=0.110", "uvicorn>=0.29"]
+dev = ["pytest>=8.0", "ruff>=0.6", "netCDF4>=1.6", "httpx>=0.27", "fastapi>=0.110", "uvicorn>=0.29"]
 
 [project.scripts]
 antroute = "antarctic_routing.cli:main"
@@ -38,6 +39,8 @@ addopts = "-q"
 filterwarnings = [
   # cftime/netCDF4 wheels built against an older numpy ABI emit this harmless notice
   "ignore:numpy.ndarray size changed:RuntimeWarning",
+  # third-party: starlette's TestClient announces its httpx migration
+  "ignore:Using `httpx` with `starlette.testclient` is deprecated",
 ]
 
 [tool.ruff]
