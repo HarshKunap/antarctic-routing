@@ -17,7 +17,7 @@ can never be mistaken for real observations or forecasts.
 from __future__ import annotations
 
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
 import numpy as np
@@ -83,6 +83,8 @@ class ScenarioSet:
     berg: np.ndarray | None = None  # (K, T, ny, nx) bool, optional
     wind_x: np.ndarray | None = None  # (T, ny, nx) 10 m wind, grid-aligned, m/s
     wind_y: np.ndarray | None = None
+    layer_source: list[str] | None = None  # per time layer: observed / forecast / climatology
+    meta: dict = field(default_factory=dict)
 
     @property
     def n_scenarios(self) -> int:
@@ -111,6 +113,26 @@ class ScenarioSet:
             warnings.simplefilter("ignore", RuntimeWarning)  # all-NaN missing ocean cells
             out[:, self.ocean] = np.nanmean(self.conc[:, :, self.ocean], axis=0)
         return out
+
+
+def schematic_currents(grid: PolarGrid, land: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """ACC: eastward jet centred near 58S with a weak meander; grid-aligned m/s, zero on land."""
+    lat, lon = grid.lat2d, grid.lon2d
+    u_e = 0.05 + 0.35 * np.exp(-(((lat + 58.0) / 2.5) ** 2))
+    v_n = 0.04 * np.sin(np.deg2rad(lon) * 6.0)
+    cx, cy = grid.rotate_en_to_xy(u_e, v_n, lon)
+    if land is not None:
+        cx[land] = 0.0
+        cy[land] = 0.0
+    return cx, cy
+
+
+def schematic_winds(grid: PolarGrid) -> tuple[np.ndarray, np.ndarray]:
+    """Southern Ocean westerlies strongest near 57S; grid-aligned 10 m wind, m/s."""
+    lat, lon = grid.lat2d, grid.lon2d
+    w_e = 4.0 + 8.0 * np.exp(-(((lat + 57.0) / 4.0) ** 2))
+    w_n = 2.0 * np.sin(np.deg2rad(lon) * 6.0)
+    return grid.rotate_en_to_xy(w_e, w_n, lon)
 
 
 def _sigmoid(x: np.ndarray) -> np.ndarray:
@@ -188,16 +210,8 @@ def generate_synthetic(
     conc = np.stack([_member(rng, base_edges, (lat, lon), land, smooth) for _ in range(n_scenarios)])
     truth = _member(np.random.default_rng([seed, 99991]), base_edges, (lat, lon), land, smooth)
 
-    # ACC: eastward jet centred near 58S, weak meridional meander. m/s.
-    u_e = 0.05 + 0.35 * np.exp(-(((lat + 58.0) / 2.5) ** 2))
-    v_n = 0.04 * np.sin(np.deg2rad(lon) * 6.0)
-    cx, cy = grid.rotate_en_to_xy(u_e, v_n, lon)
-    cx[land] = 0.0
-    cy[land] = 0.0
-    # Southern Ocean westerlies, strongest near 57S. m/s.
-    w_e = 4.0 + 8.0 * np.exp(-(((lat + 57.0) / 4.0) ** 2))
-    w_n = 2.0 * np.sin(np.deg2rad(lon) * 6.0)
-    wx, wy = grid.rotate_en_to_xy(w_e, w_n, lon)
+    cx, cy = schematic_currents(grid, land)
+    wx, wy = schematic_winds(grid)
 
     return ScenarioSet(
         grid=grid,
