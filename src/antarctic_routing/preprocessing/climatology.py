@@ -81,7 +81,7 @@ class Climatology:
         sums = np.zeros((n_days, *conc.shape[1:]))
         sq = np.zeros_like(sums)
         cnt = np.zeros_like(sums)
-        for field, d in zip(conc, dates):
+        for field, d in zip(conc, dates, strict=True):
             s = season_of(d, season_months)
             if s is None or s not in train:
                 continue

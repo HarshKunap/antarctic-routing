@@ -23,7 +23,7 @@ def _waypoints(candidate: Candidate, world: ScenarioSet) -> list[dict]:
     grid = world.grid
     seg = candidate.evaluation.segment_breach_prob
     rows = []
-    for i, ((r, c), hours) in enumerate(zip(candidate.route.cells, candidate.route.arrival_hours)):
+    for i, ((r, c), hours) in enumerate(zip(candidate.route.cells, candidate.route.arrival_hours, strict=True)):
         rows.append({
             "waypoint_index": i,
             "lat": round(float(grid.lat2d[r, c]), 6),

@@ -32,7 +32,7 @@ def test_grid_spacing_and_shape(grid):
 def test_grid_covers_entire_domain_boundary(grid):
     lats = np.r_[np.linspace(-66, -55, 50), np.full(50, -66.0), np.full(50, -55.0)]
     lons = np.r_[np.full(50, -72.0), np.linspace(-72, -52, 50), np.linspace(-72, -52, 50)]
-    for lat, lon in zip(lats, lons):
+    for lat, lon in zip(lats, lons, strict=True):
         grid.cell_of(lat, lon)  # must not raise
 
 

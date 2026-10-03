@@ -2,7 +2,7 @@ from datetime import date, timedelta
 
 import numpy as np
 
-from _worlds import A, B, NX, NY, _vessel, _world
+from _worlds import NX, NY, A, B, _vessel, _world
 from antarctic_routing.routing.departure import sweep_departures
 
 DATES = [date(2026, 12, 1) + timedelta(days=i) for i in range(4)]
@@ -22,7 +22,7 @@ def _factory(kind_by_date):
 
 def _sweep(kinds):
     return sweep_departures(
-        DATES, _factory(dict(zip(DATES, kinds))), _vessel(), A, B,
+        DATES, _factory(dict(zip(DATES, kinds, strict=True))), _vessel(), A, B,
         risk_budget=0.05, risk_weights=[0, 100], n_scenario_routes=0,
     )
 

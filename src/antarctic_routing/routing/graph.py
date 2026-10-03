@@ -89,6 +89,6 @@ class RoutingGrid:
             ux, uy = dc / norm, dr / norm  # columns follow +x, rows follow +y
             src = (src_r * nx + src_c).tolist()
             dst = (dst_r * nx + dst_c).tolist()
-            for s, d, km in zip(src, dst, (np.asarray(dist_m) / 1000.0).tolist()):
+            for s, d, km in zip(src, dst, (np.asarray(dist_m) / 1000.0).tolist(), strict=True):
                 adjacency[s].append((d, km, ux, uy))
         return cls(grid=grid, navigable=nav, moves=list(moves), adjacency=adjacency)

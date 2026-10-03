@@ -24,6 +24,7 @@ import heapq
 import math
 from dataclasses import dataclass, field
 from functools import cached_property
+from itertools import pairwise
 
 import numpy as np
 from pyproj import Geod
@@ -194,7 +195,7 @@ def plan_route(
     path.reverse()
     cells = [rgrid.cell(n) for n in path]
     dist_lookup = {}
-    for a, b in zip(path, path[1:]):
+    for a, b in pairwise(path):
         dist_lookup[(a, b)] = next(d for n2, d, *_ in rgrid.adjacency[a] if n2 == b)
     return Route(
         objective=objective.name,

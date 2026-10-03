@@ -8,7 +8,6 @@ version = "0.1.0"
 description = "Antarctic vessel routing and ice-risk forecasting: uncertainty-aware, risk-budgeted route and departure planning (research prototype)."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
 authors = [{ name = "ryanshaon" }]
 dependencies = [
   "numpy>=1.26",
@@ -23,7 +22,7 @@ dependencies = [
 [project.optional-dependencies]
 ingest = ["requests>=2.31", "cdsapi>=0.7", "copernicusmarine>=1.0", "netCDF4>=1.6"]
 ml = ["torch>=2.2"]
-dev = ["pytest>=8.0", "netCDF4>=1.6"]
+dev = ["pytest>=8.0", "ruff>=0.6", "netCDF4>=1.6"]
 
 [project.scripts]
 antroute = "antarctic_routing.cli:main"
@@ -34,3 +33,15 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "W"]
+ignore = ["E741"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["antarctic_routing", "_worlds"]

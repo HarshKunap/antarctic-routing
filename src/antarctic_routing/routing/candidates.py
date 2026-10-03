@@ -156,7 +156,8 @@ def plan_candidates(
             risk_budget, estimator, warnings,
         )
 
-    min(feasible, key=lambda c: (c.evaluation.expected_hours, c.evaluation.expected_fuel)).tags.append("fastest_feasible")
+    fastest = min(feasible, key=lambda c: (c.evaluation.expected_hours, c.evaluation.expected_fuel))
+    fastest.tags.append("fastest_feasible")
     min(feasible, key=lambda c: c.evaluation.distance_km).tags.append("shortest_feasible")
     best = min(feasible, key=lambda c: (c.evaluation.expected_fuel, c.evaluation.expected_hours))
     best.tags.append("lowest_fuel_feasible")

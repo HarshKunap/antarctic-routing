@@ -3,6 +3,7 @@
 import numpy as np
 import pytest
 
+from _worlds import DIST, NX, NY, TIME, A, B, _grid, _vessel, _world
 from antarctic_routing.routing.candidates import is_feasible, plan_candidates
 from antarctic_routing.routing.evaluate import evaluate_route
 from antarctic_routing.routing.graph import RoutingGrid
@@ -12,8 +13,6 @@ from antarctic_routing.routing.optimizer import (
     layers_from_scenarios,
     plan_route,
 )
-
-from _worlds import A, B, DIST, NX, NY, TIME, _grid, _vessel, _world
 
 
 def _plan(world, objective, start=A, goal=B, vessel=None, connectivity=16, **kw):
