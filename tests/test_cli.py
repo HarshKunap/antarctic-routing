@@ -212,3 +212,34 @@ def test_voyage_brief_pdf(tmp_path):
     data = out.read_bytes()
     assert data.startswith(b"%PDF")
     assert data.count(b"/Type /Page") - data.count(b"/Type /Pages") >= 2
+
+
+def test_build_forcing_and_use_it_in_plan_window(tmp_path):
+    from test_forcing import write_cmems, write_era5
+
+    era5, cmems = write_era5(tmp_path / "era5.nc"), write_cmems(tmp_path / "cmems.nc")
+    forcing = tmp_path / "forcing.nc"
+    assert main(["build-forcing", "--config", CONFIG, "--era5", str(era5), "--cmems", str(cmems),
+                 "--resolution-km", "50", "--out", str(forcing)]) == 0
+    assert forcing.is_file() and forcing.with_suffix(".stage-result.json").is_file()
+    common = ["--config", CONFIG, "--synthetic-seasons", "2010:2016", "--resolution-km", "50",
+              "--history-days", "5", "--lead-days", "3", "--n-val", "1", "--n-test", "1"]
+    assert main(["train-forecast", *common, "--epochs", "1", "--base-channels", "8",
+                 "--out", str(tmp_path / "model")]) == 0
+    rc = main(["plan-window", *common, "--weights", str(tmp_path / "model" / "best.pt"), "--forcing", str(forcing),
+               "--issue", "2015-12-20", "--window-days", "2", "--members", "80",
+               "--iceberg", "B1:-60.2:-62.6", "--out", str(tmp_path / "w")])
+    assert rc == 0
+    out = json.loads((tmp_path / "w" / "plan_window.json").read_text())
+    assert out["forcing"] == str(forcing)
+    assert out["icebergs"] == [{"id": "B1", "lat": -60.2, "lon": -62.6}]
+
+
+def test_fetch_forcing_without_credentials_is_blocked(tmp_path, monkeypatch):
+    monkeypatch.delenv("CDSAPI_KEY", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    rc = main(["fetch-forcing", "--config", CONFIG, "--start", "2024-12-01", "--end", "2024-12-03",
+               "--root", str(tmp_path / "raw")])
+    assert rc == 1
+    summary = json.loads((tmp_path / "raw" / "forcing-summary.json").read_text())
+    assert {r["status"] for r in summary["results"]} <= {"blocked", "failed"}

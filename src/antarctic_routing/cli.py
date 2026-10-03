@@ -16,6 +16,7 @@ import time
 from datetime import date, timedelta
 from pathlib import Path
 
+import numpy as np
 from pyproj import Geod
 
 from antarctic_routing import DISCLAIMER, __version__
@@ -370,8 +371,17 @@ def _forecast_context(args, ds, months, split, n_bank: int = 300):
 
     model, meta = load_model(args.weights)
     tc = meta["train_config"]
+    currents = winds = None
+    if getattr(args, "forcing", None):
+        from antarctic_routing.ingestion.forcing import load_forcing
+
+        currents, winds = load_forcing(args.forcing, expected_shape=ds["land_mask"].shape)
+        if currents is not None:
+            land = ds["land_mask"].values.astype(bool)
+            currents = (np.where(land, 0.0, currents[0]), np.where(land, 0.0, currents[1]))
     ctx = ForecastContext.build(ds, unet_predictor(model), tc["history_days"], tc["lead_days"], months,
-                                meta["train_seasons"], bank_size=n_bank, seed=args.seed)
+                                meta["train_seasons"], bank_size=n_bank, seed=args.seed,
+                                currents=currents, winds=winds)
     return ctx, meta
 
 
@@ -391,6 +401,12 @@ def cmd_plan_window(args) -> int:
         trust = int(json.loads(Path(args.trust_report).read_text())["trust_horizon_days"])
     n_days = args.window_days + _horizon_days(cfg)
     world = ctx.scenarios(args.issue, n_days, args.members, np.random.default_rng(args.seed))
+    bergs = _parse_bergs(args)
+    if bergs:
+        from antarctic_routing.iceberg.drift import add_iceberg_hazard
+
+        world = add_iceberg_hazard(world, bergs, rng=np.random.default_rng(args.seed),
+                                   radius_m=args.berg_radius_km * 1e3)
     grid = grid_of(ds)
     o = grid.cell_of(cfg.route.origin.lat, cfg.route.origin.lon)
     d = grid.cell_of(cfg.route.destination.lat, cfg.route.destination.lon)
@@ -403,6 +419,8 @@ def cmd_plan_window(args) -> int:
     payload = {**sweep.to_dict(), "issue": args.issue.isoformat(), "trust_horizon_days": trust,
                "layer_source": world.layer_source, "n_members": world.n_scenarios,
                "forecast_lead_days": ctx.lead_days, "model_train_seasons": meta["train_seasons"],
+               "forcing": args.forcing or "schematic (no --forcing given)",
+               "icebergs": [{"id": b[0], "lat": b[1], "lon": b[2]} for b in bergs],
                "execution_mode": world.execution_mode, "data_description": world.description,
                "disclaimer": DISCLAIMER}
     write_json_artifact(out / "plan_window.json", payload)
@@ -559,6 +577,53 @@ def cmd_brief(args) -> int:
     return 0
 
 
+def cmd_fetch_forcing(args) -> int:
+    from antarctic_routing.ingestion import cmems, era5
+    from antarctic_routing.ingestion.base import run_download
+
+    cfg = load_config(args.config)
+    root = Path(args.root)
+    jobs = []
+    if not args.skip_era5:
+        jobs.append(("era5", era5.request_for(cfg.domain, args.start, args.end), era5.make_fetcher(cfg.domain)))
+    if not args.skip_cmems:
+        jobs.append(("cmems", cmems.request_for(cfg.domain, args.start, args.end, args.cmems_dataset),
+                     cmems.make_fetcher(cfg.domain, args.cmems_dataset)))
+    results = []
+    for name, req, fetch in jobs:
+        res = run_download(req, root, fetch)
+        results.append({"source": name, "status": res.status, "outputs": res.outputs, "warnings": res.warnings})
+        print(f"  {name:6s} {res.status:8s} {'; '.join(res.warnings)[:140]}")
+    write_json_artifact(root / "forcing-summary.json", {"results": results})
+    ok = all(r["status"] == "passed" for r in results)
+    print("Forcing files ready." if ok else "Some forcing downloads did not complete - see forcing-summary.json.")
+    return 0 if ok else 1
+
+
+def cmd_build_forcing(args) -> int:
+    from antarctic_routing.ingestion.forcing import build_forcing
+
+    t0, started = time.time(), utc_now()
+    cfg = load_config(args.config)
+    grid = PolarGrid.from_domain(cfg.domain, args.resolution_km or cfg.grid.resolution_km)
+    ds = build_forcing(grid, era5_path=args.era5, cmems_path=args.cmems)
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    ds.to_netcdf(out)
+    inputs = [file_record(Path(p), name) for p, name in ((args.era5, "ERA5"), (args.cmems, "CMEMS")) if p]
+    stage = StageResult(
+        stage="harmonise_forcing", status="passed", execution_mode="real", software=SOFTWARE, inputs=inputs,
+        parameters={"resolution_km": grid.resolution_m / 1000, "averaging": ds.attrs["averaging"]},
+        outputs=[file_record(out, "forcing fields")],
+        metrics={k: v for k, v in ds.attrs.items() if k.endswith("filled_fraction")},
+        command=" ".join(["antroute", *args.argv]), started_at=started, finished_at=utc_now(),
+        duration_seconds=round(time.time() - t0, 3),
+    )
+    write_json_artifact(out.with_suffix(".stage-result.json"), stage.to_dict())
+    print(f"Wrote {out} ({', '.join(ds.data_vars)})")
+    return 0
+
+
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="antroute", description=__doc__.splitlines()[0])
     p.add_argument("--version", action="version", version=f"antarctic-routing {__version__}")
@@ -605,6 +670,24 @@ def _parser() -> argparse.ArgumentParser:
     bd.add_argument("--resolution-km", type=float, default=None)
     bd.set_defaults(func=cmd_build_dataset)
 
+    ff = sub.add_parser("fetch-forcing", help="download ERA5 winds and CMEMS currents (needs credentials)")
+    ff.add_argument("--config", default=DEFAULT_CONFIG)
+    ff.add_argument("--start", type=date.fromisoformat, required=True)
+    ff.add_argument("--end", type=date.fromisoformat, required=True)
+    ff.add_argument("--root", default="data/raw")
+    ff.add_argument("--cmems-dataset", default="cmems_mod_glo_phy_my_0.083deg_P1D-m")
+    ff.add_argument("--skip-era5", action="store_true")
+    ff.add_argument("--skip-cmems", action="store_true")
+    ff.set_defaults(func=cmd_fetch_forcing)
+
+    bf = sub.add_parser("build-forcing", help="ERA5/CMEMS NetCDF -> wind/current fields on the polar grid")
+    bf.add_argument("--config", default=DEFAULT_CONFIG)
+    bf.add_argument("--era5", default=None)
+    bf.add_argument("--cmems", default=None)
+    bf.add_argument("--resolution-km", type=float, default=None)
+    bf.add_argument("--out", default="data/processed/forcing.nc")
+    bf.set_defaults(func=cmd_build_forcing)
+
     def forecast_common(sp):
         sp.add_argument("--config", default=DEFAULT_CONFIG)
         src = sp.add_mutually_exclusive_group()
@@ -616,6 +699,7 @@ def _parser() -> argparse.ArgumentParser:
         sp.add_argument("--n-val", type=int, default=3)
         sp.add_argument("--n-test", type=int, default=3)
         sp.add_argument("--seed", type=int, default=42)
+        sp.add_argument("--forcing", default=None, help="forcing.nc from build-forcing (real winds/currents)")
 
     tf = sub.add_parser("train-forecast", help="train the sea-ice U-Net")
     forecast_common(tf)
@@ -657,6 +741,9 @@ def _parser() -> argparse.ArgumentParser:
     pw.add_argument("--scenario-routes", type=int, default=2)
     pw.add_argument("--trust-report", default=None, help="trust_horizon.json from trust-horizon")
     pw.add_argument("--require-trusted", action="store_true")
+    pw.add_argument("--iceberg", action="append", metavar="ID:LAT:LON", help="tracked iceberg (repeatable)")
+    pw.add_argument("--icebergs", default=None, help="USNIC iceberg list CSV (latest position per berg)")
+    pw.add_argument("--berg-radius-km", type=float, default=10.0)
     pw.add_argument("--out", default="reports/window")
     pw.set_defaults(func=cmd_plan_window)
 
