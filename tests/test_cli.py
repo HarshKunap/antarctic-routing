@@ -266,3 +266,45 @@ def test_fetch_forcing_without_credentials_is_blocked(tmp_path, monkeypatch):
     assert rc == 1
     summary = json.loads((tmp_path / "raw" / "forcing-summary.json").read_text())
     assert {r["status"] for r in summary["results"]} <= {"blocked", "failed"}
+
+
+def test_forecast_horizon_defaults_to_config_lead_days_end_to_end(tmp_path):
+    """No --lead-days: config forecast.lead_days drives the samples, the model output and the evaluation."""
+    import pytest
+    import torch
+
+    from antarctic_routing.config import load_config
+    from antarctic_routing.forecasting.train import load_model
+
+    lead = load_config(CONFIG).forecast.lead_days
+    assert lead == 21
+    common = ["--config", CONFIG, "--synthetic-seasons", "2010:2016", "--resolution-km", "50",
+              "--history-days", "5", "--n-val", "1", "--n-test", "1"]
+    assert main(["train-forecast", *common, "--epochs", "1", "--base-channels", "8",
+                 "--out", str(tmp_path / "model")]) == 0
+    model, meta = load_model(tmp_path / "model" / "best.pt")
+    assert meta["train_config"]["lead_days"] == lead and meta["out_channels"] == lead
+    with torch.no_grad():
+        out = model(torch.zeros(1, meta["in_channels"], *meta["grid_shape"]))
+    assert out.shape[1] == lead
+
+    assert main(["evaluate-forecast", *common, "--weights", str(tmp_path / "model" / "best.pt"),
+                 "--out", str(tmp_path / "report")]) == 0
+    report = json.loads((tmp_path / "report" / "forecast_eval.json").read_text())
+    assert report["leads"] == list(range(1, lead + 1))
+    assert report["n_samples"] == 120 - 5 - lead + 1  # one test season, windows built with the 21-day horizon
+    with pytest.raises(SystemExit, match="does not match the checkpoint"):
+        main(["evaluate-forecast", *common, "--lead-days", "7", "--weights", str(tmp_path / "model" / "best.pt"),
+              "--out", str(tmp_path / "report7")])
+
+
+def test_evaluate_refuses_checkpoint_trained_on_another_resolution(tmp_path):
+    import pytest
+
+    common = ["--config", CONFIG, "--synthetic-seasons", "2010:2016", "--history-days", "5", "--lead-days", "3",
+              "--n-val", "1", "--n-test", "1"]
+    assert main(["train-forecast", *common, "--resolution-km", "50", "--epochs", "1", "--base-channels", "8",
+                 "--out", str(tmp_path / "model")]) == 0
+    with pytest.raises(SystemExit, match="resolution 100 km != trained 50 km"):
+        main(["evaluate-forecast", *common, "--resolution-km", "100",
+              "--weights", str(tmp_path / "model" / "best.pt"), "--out", str(tmp_path / "report")])

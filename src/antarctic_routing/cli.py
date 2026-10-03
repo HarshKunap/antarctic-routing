@@ -275,26 +275,43 @@ def cmd_train_forecast(args) -> int:
     from antarctic_routing.forecasting.train import TrainConfig, train_unet
 
     cfg, ds, months, split = _forecast_data(args)
-    tc = TrainConfig(history_days=args.history_days or cfg.forecast.history_days, lead_days=args.lead_days,
+    tc = TrainConfig(history_days=args.history_days or cfg.forecast.history_days,
+                     lead_days=args.lead_days or cfg.forecast.lead_days,
                      epochs=args.epochs, base_channels=args.base_channels, seed=args.seed,
                      residual=not args.direct)
     print(f"Training on seasons {split['train']}, validating on {split['val']} "
-          f"({ds.attrs.get('execution_mode', 'real')} data)")
-    result = train_unet(ds, split["train"], split["val"], months, tc, args.out)
+          f"({ds.attrs.get('execution_mode', 'real')} data; {tc.history_days} d history, {tc.lead_days} d leads)")
+    synthetic_id = None if args.data else f"synthetic_history:{args.synthetic_seasons}:seed={args.seed}"
+    result = train_unet(ds, split["train"], split["val"], months, tc, args.out,
+                        dataset_path=args.data, dataset_id=synthetic_id)
     for row in result.history:
         print(f"  epoch {row['epoch']:3d}  train {row['train_loss']:.4f}  val MAE {row['val_mae']:.4f}")
     print(f"Best epoch {result.best_epoch}; checkpoint {result.checkpoint}")
     return 0
 
 
+def _load_checkpoint(args, ds):
+    """Load ``--weights`` for ``ds``: the grid must match and an explicit --lead-days must agree."""
+    from antarctic_routing.forecasting.train import load_model
+
+    try:
+        model, meta = load_model(args.weights, ds)
+    except ValueError as exc:
+        raise SystemExit(f"refusing to use {args.weights}: {exc}") from None
+    trained = meta["train_config"]["lead_days"]
+    if args.lead_days is not None and args.lead_days != trained:
+        raise SystemExit(f"--lead-days {args.lead_days} does not match the checkpoint's {trained}-day horizon")
+    return model, meta
+
+
 def cmd_evaluate_forecast(args) -> int:
     from antarctic_routing.forecasting.evaluate import evaluate_forecasts
-    from antarctic_routing.forecasting.train import load_model, unet_predictor
+    from antarctic_routing.forecasting.train import unet_predictor
     from antarctic_routing.viz import plot_forecast_skill
 
     t0, started = time.time(), utc_now()
     cfg, ds, months, split = _forecast_data(args)
-    model, meta = load_model(args.weights)
+    model, meta = _load_checkpoint(args, ds)
     hd, ld = meta["train_config"]["history_days"], meta["train_config"]["lead_days"]
     if set(meta["train_seasons"]) & set(split["test"]):
         raise SystemExit("refusing to evaluate: checkpoint was trained on a test season")
@@ -322,11 +339,11 @@ def cmd_evaluate_forecast(args) -> int:
 
 def cmd_calibrate_forecast(args) -> int:
     from antarctic_routing.forecasting.calibration import evaluate_probabilities
-    from antarctic_routing.forecasting.train import load_model, unet_predictor
+    from antarctic_routing.forecasting.train import unet_predictor
     from antarctic_routing.viz import plot_reliability
 
     cfg, ds, months, split = _forecast_data(args)
-    model, meta = load_model(args.weights)
+    model, meta = _load_checkpoint(args, ds)
     if set(meta["train_seasons"]) & (set(split["val"]) | set(split["test"])):
         raise SystemExit("refusing to calibrate: checkpoint was trained on a validation/test season")
     tc = meta["train_config"]
@@ -378,9 +395,9 @@ def cmd_trust_horizon(args) -> int:
 
 def _forecast_context(args, ds, months, split, n_bank: int = 300):
     from antarctic_routing.forecasting.scenarios import ForecastContext
-    from antarctic_routing.forecasting.train import load_model, unet_predictor
+    from antarctic_routing.forecasting.train import unet_predictor
 
-    model, meta = load_model(args.weights)
+    model, meta = _load_checkpoint(args, ds)
     tc = meta["train_config"]
     currents = winds = None
     if getattr(args, "forcing", None):
@@ -706,7 +723,9 @@ def _parser() -> argparse.ArgumentParser:
         src.add_argument("--synthetic-seasons", default="2004:2024", help="start:end (end exclusive)")
         sp.add_argument("--resolution-km", type=float, default=None)
         sp.add_argument("--history-days", type=int, default=None)
-        sp.add_argument("--lead-days", type=int, default=7)
+        sp.add_argument("--lead-days", type=int, default=None,
+                        help="forecast horizon; default: config forecast.lead_days (training) or the "
+                             "checkpoint's horizon (evaluation), which must agree if given")
         sp.add_argument("--n-val", type=int, default=3)
         sp.add_argument("--n-test", type=int, default=3)
         sp.add_argument("--seed", type=int, default=42)
