@@ -16,6 +16,7 @@ can never be mistaken for real observations or forecasts.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
@@ -100,8 +101,12 @@ class ScenarioSet:
         return int(min(max(hours // self.time_step_hours, 0), self.n_times - 1))
 
     def mean_conc(self) -> np.ndarray:
-        with np.errstate(invalid="ignore"):
-            return np.nanmean(self.conc, axis=0) if self.n_scenarios else self.conc[0]
+        """Ensemble-mean concentration (T, ny, nx); NaN on land."""
+        out = np.full(self.conc.shape[1:], np.nan)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)  # all-NaN missing ocean cells
+            out[:, self.ocean] = np.nanmean(self.conc[:, :, self.ocean], axis=0)
+        return out
 
 
 def _sigmoid(x: np.ndarray) -> np.ndarray:
