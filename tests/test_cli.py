@@ -145,3 +145,22 @@ def test_trust_horizon_from_evaluation_report(tmp_path):
     assert th["by_baseline"]["climatology"]["trust_horizon_days"] == 2
     assert th["trust_horizon_days"] == 2
     assert (tmp_path / "t" / "trust_horizon.png").is_file()
+
+
+def test_plan_window_from_one_forecast_issue(tmp_path):
+    common = ["--config", CONFIG, "--synthetic-seasons", "2010:2016", "--resolution-km", "50",
+              "--history-days", "5", "--lead-days", "3", "--n-val", "1", "--n-test", "1"]
+    assert main(["train-forecast", *common, "--epochs", "1", "--base-channels", "8",
+                 "--out", str(tmp_path / "model")]) == 0
+    trust = tmp_path / "trust.json"
+    trust.write_text(json.dumps({"trust_horizon_days": 2}))
+    rc = main(["plan-window", *common, "--weights", str(tmp_path / "model" / "best.pt"),
+               "--issue", "2015-12-20", "--window-days", "4", "--members", "80",
+               "--trust-report", str(trust), "--out", str(tmp_path / "w")])
+    assert rc == 0
+    out = json.loads((tmp_path / "w" / "plan_window.json").read_text())
+    assert [o["lead_days"] for o in out["options"]] == [0, 1, 2, 3]
+    assert out["issue"] == "2015-12-20" and out["trust_horizon_days"] == 2
+    assert out["layer_source"][0] == "observed" and "climatology" in out["layer_source"]
+    assert all(o["support"] in ("forecast-supported", "climatology-dominated") for o in out["options"])
+    assert (tmp_path / "w" / "departure_window.png").is_file()

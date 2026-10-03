@@ -119,7 +119,8 @@ def plot_plan(world: ScenarioSet, plan: PlanResult, tau: float, path: str | Path
     return out
 
 
-def plot_departures(sweep: DepartureSweep, risk_budget: float, path: str | Path, title: str) -> Path:
+def plot_departures(sweep: DepartureSweep, risk_budget: float, path: str | Path, title: str,
+                    issue=None, forecast_days: int | None = None, trust_horizon_days: int | None = None) -> Path:
     opts = sweep.options
     dates = [o.departure for o in opts]
     ub = [min(o.p_breach_upper, 1.0) for o in opts]
@@ -128,7 +129,25 @@ def plot_departures(sweep: DepartureSweep, risk_budget: float, path: str | Path,
     ok = [o.feasible for o in opts]
 
     fig, axes = plt.subplots(3, 1, figsize=(10, 7.5), dpi=130, sharex=True)
-    axes[0].bar(dates, ub, color=["#3a8f6b" if f else "#d1495b" for f in ok], width=0.8)
+    bars = axes[0].bar(dates, ub, color=["#3a8f6b" if f else "#d1495b" for f in ok], width=0.8)
+    for bar, opt in zip(bars, opts, strict=True):
+        if opt.support == "climatology-dominated":
+            bar.set_hatch("///")
+            bar.set_edgecolor("white")
+    if issue is not None:
+        from datetime import timedelta
+
+        marks = []
+        if forecast_days is not None:
+            marks.append((issue + timedelta(days=forecast_days), "#4f86c6", f"forecast horizon ({forecast_days} d)"))
+        if trust_horizon_days is not None:
+            marks.append((issue + timedelta(days=trust_horizon_days), "#7a4fb3",
+                          f"trust horizon ({trust_horizon_days} d)"))
+        for when, colour, label in marks:
+            for ax in axes:
+                ax.axvline(when, color=colour, ls="--", lw=1.2)
+            axes[0].text(when, 1.02, " " + label, color=colour, fontsize=7, va="bottom")
+        axes[0].bar([], [], color="#888", hatch="///", edgecolor="white", label="climatology-dominated voyage")
     axes[0].axhline(risk_budget, color="black", ls="--", lw=1, label=f"risk budget {risk_budget:.0%}")
     axes[0].set_ylabel("P(breach)\nupper bound")
     axes[0].set_ylim(0, 1.05)

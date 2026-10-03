@@ -364,6 +364,60 @@ def cmd_trust_horizon(args) -> int:
     return 0
 
 
+def _forecast_context(args, ds, months, split, n_bank: int = 300):
+    from antarctic_routing.forecasting.scenarios import ForecastContext
+    from antarctic_routing.forecasting.train import load_model, unet_predictor
+
+    model, meta = load_model(args.weights)
+    tc = meta["train_config"]
+    ctx = ForecastContext.build(ds, unet_predictor(model), tc["history_days"], tc["lead_days"], months,
+                                meta["train_seasons"], bank_size=n_bank, seed=args.seed)
+    return ctx, meta
+
+
+def cmd_plan_window(args) -> int:
+    import json
+
+    import numpy as np
+
+    from antarctic_routing.forecasting.scenarios import grid_of
+    from antarctic_routing.routing.departure import plan_from_issue
+    from antarctic_routing.viz import plot_departures
+
+    cfg, ds, months, split = _forecast_data(args)
+    ctx, meta = _forecast_context(args, ds, months, split)
+    trust = None
+    if args.trust_report:
+        trust = int(json.loads(Path(args.trust_report).read_text())["trust_horizon_days"])
+    n_days = args.window_days + _horizon_days(cfg)
+    world = ctx.scenarios(args.issue, n_days, args.members, np.random.default_rng(args.seed))
+    grid = grid_of(ds)
+    o = grid.cell_of(cfg.route.origin.lat, cfg.route.origin.lon)
+    d = grid.cell_of(cfg.route.destination.lat, cfg.route.destination.lon)
+    sweep = plan_from_issue(
+        world, list(range(args.window_days)), VesselModel.from_config(cfg), o, d, cfg.routing.risk_budget,
+        cfg.routing.risk_weights, cfg.routing.risk_estimator, cfg.routing.connectivity, args.scenario_routes,
+        cfg.routing.confidence, args.seed, trust_horizon_days=trust, require_trusted=args.require_trusted,
+    )
+    out = Path(args.out)
+    payload = {**sweep.to_dict(), "issue": args.issue.isoformat(), "trust_horizon_days": trust,
+               "layer_source": world.layer_source, "n_members": world.n_scenarios,
+               "forecast_lead_days": ctx.lead_days, "model_train_seasons": meta["train_seasons"],
+               "execution_mode": world.execution_mode, "data_description": world.description,
+               "disclaimer": DISCLAIMER}
+    write_json_artifact(out / "plan_window.json", payload)
+    plot_departures(sweep, cfg.routing.risk_budget, out / "departure_window.png",
+                    f"Departure window from forecast issued {args.issue} ({world.n_scenarios} joint scenarios)",
+                    issue=args.issue, forecast_days=ctx.lead_days, trust_horizon_days=trust)
+    for opt in sweep.options:
+        flag = "OK " if opt.feasible else "-- "
+        trusted = "" if opt.within_trust_horizon is None else (" trusted" if opt.within_trust_horizon else " UNTRUSTED")
+        print(f"  {flag}+{opt.lead_days:2d} d {opt.departure}  UB {opt.p_breach_upper:6.1%}  "
+              f"E[t] {opt.expected_hours:5.1f} h  {opt.support}{trusted}")
+    print(sweep.explanation)
+    return 0
+
+
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="antroute", description=__doc__.splitlines()[0])
     p.add_argument("--version", action="version", version=f"antarctic-routing {__version__}")
@@ -452,6 +506,18 @@ def _parser() -> argparse.ArgumentParser:
     th.add_argument("--seed", type=int, default=0)
     th.add_argument("--out", default="reports/trust")
     th.set_defaults(func=cmd_trust_horizon)
+
+    pw = sub.add_parser("plan-window", help="departure window from one forecast issue")
+    forecast_common(pw)
+    pw.add_argument("--weights", default="models/unet/best.pt")
+    pw.add_argument("--issue", type=date.fromisoformat, required=True)
+    pw.add_argument("--window-days", type=int, default=14)
+    pw.add_argument("--members", type=int, default=200)
+    pw.add_argument("--scenario-routes", type=int, default=2)
+    pw.add_argument("--trust-report", default=None, help="trust_horizon.json from trust-horizon")
+    pw.add_argument("--require-trusted", action="store_true")
+    pw.add_argument("--out", default="reports/window")
+    pw.set_defaults(func=cmd_plan_window)
     return p
 
 
