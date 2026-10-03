@@ -37,3 +37,38 @@ def test_departures_sweep_writes_chart_and_table(tmp_path):
     sweep = json.loads((tmp_path / "departures.json").read_text())
     assert len(sweep["options"]) == 4
     assert (tmp_path / "departure_chart.png").is_file()
+
+
+def test_build_dataset_from_osisaf_files(tmp_path):
+    from datetime import date
+
+    import xarray as xr
+
+    from _osisaf_fixture import write_osisaf
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    for d in (1, 2):
+        write_osisaf(raw / f"ice_{d}.nc", date(2024, 12, d))
+    out = tmp_path / "sea_ice.nc"
+    rc = main(["build-dataset", "--config", CONFIG, "--inputs", str(raw / "*.nc"), "--out", str(out),
+               "--resolution-km", "25"])
+    assert rc == 0
+    with xr.open_dataset(out) as ds:
+        assert ds.sizes["time"] == 2 and ds.attrs["execution_mode"] == "real"
+    stage = json.loads(out.with_suffix(".stage-result.json").read_text())
+    assert stage["status"] == "passed" and len(stage["inputs"]) == 2
+
+
+def test_fetch_sea_ice_reports_blocked_or_failed_without_network(tmp_path, monkeypatch):
+    import antarctic_routing.ingestion.sea_ice as sea_ice
+
+    def offline(request, dest, timeout=60.0):
+        raise ConnectionError("network unavailable")
+
+    monkeypatch.setattr(sea_ice, "fetch_osisaf", offline)
+    rc = main(["fetch-sea-ice", "--config", CONFIG, "--start", "2024-12-01", "--end", "2024-12-02",
+               "--root", str(tmp_path)])
+    assert rc == 1
+    summary = json.loads((tmp_path / "sea_ice" / "fetch-summary.json").read_text())
+    assert [r["status"] for r in summary["results"]] == ["failed", "failed"]

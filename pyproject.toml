@@ -33,6 +33,10 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+filterwarnings = [
+  # cftime/netCDF4 wheels built against an older numpy ABI emit this harmless notice
+  "ignore:numpy.ndarray size changed:RuntimeWarning",
+]
 
 [tool.ruff]
 line-length = 120

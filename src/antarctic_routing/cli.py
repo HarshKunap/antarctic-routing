@@ -164,6 +164,57 @@ def cmd_departures(args) -> int:
     return 0
 
 
+def cmd_fetch_sea_ice(args) -> int:
+    from antarctic_routing.ingestion import sea_ice
+    from antarctic_routing.ingestion.base import run_download
+
+    cfg = load_config(args.config)
+    d = cfg.domain
+    root = Path(args.root)
+    results = []
+    for req in sea_ice.daily_requests(args.start, args.end, (d.lat_min, d.lat_max, d.lon_min, d.lon_max)):
+        res = run_download(req, root, lambda r, dest: sea_ice.fetch_osisaf(r, dest))
+        results.append({"date": req.start.isoformat(), "status": res.status,
+                        "outputs": res.outputs, "warnings": res.warnings})
+        print(f"  {req.start}  {res.status:8s} {'; '.join(res.warnings)[:100]}")
+    write_json_artifact(root / "sea_ice" / "fetch-summary.json", {"product": sea_ice.PRODUCT, "results": results})
+    ok = all(r["status"] == "passed" for r in results)
+    print("All files available." if ok else "Some downloads did not complete - see fetch-summary.json.")
+    return 0 if ok else 1
+
+
+def cmd_build_dataset(args) -> int:
+    import glob
+
+    from antarctic_routing.ingestion.osisaf_reader import build_sea_ice_dataset
+
+    t0, started = time.time(), utc_now()
+    cfg = load_config(args.config)
+    grid = PolarGrid.from_domain(cfg.domain, args.resolution_km or cfg.grid.resolution_km)
+    paths = sorted({p for pattern in args.inputs for p in glob.glob(pattern, recursive=True)})
+    if not paths:
+        print("No input files matched.")
+        return 1
+    ds = build_sea_ice_dataset(paths, grid)
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    ds.to_netcdf(out)
+    imputed = float(ds["imputed_mask"].mean())
+    stage = StageResult(
+        stage="harmonise_sea_ice", status="passed", execution_mode="real", software=SOFTWARE,
+        inputs=[file_record(Path(p), "OSI-401-b") for p in paths],
+        parameters={"resolution_km": grid.resolution_m / 1000, "crs": "EPSG:3031"},
+        outputs=[file_record(out, "harmonised sea-ice dataset")],
+        metrics={"days": int(ds.sizes["time"]), "imputed_fraction": imputed,
+                 "land_fraction": float(ds["land_mask"].mean())},
+        command=" ".join(["antroute", *args.argv]), started_at=started, finished_at=utc_now(),
+        duration_seconds=round(time.time() - t0, 3),
+    )
+    write_json_artifact(out.with_suffix(".stage-result.json"), stage.to_dict())
+    print(f"Wrote {out} ({ds.sizes['time']} days, {imputed:.1%} imputed cells)")
+    return 0
+
+
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="antroute", description=__doc__.splitlines()[0])
     p.add_argument("--version", action="version", version=f"antarctic-routing {__version__}")
@@ -192,6 +243,20 @@ def _parser() -> argparse.ArgumentParser:
     dp.add_argument("--end", type=date.fromisoformat, default=None)
     dp.add_argument("--step-days", type=int, default=1)
     dp.set_defaults(func=cmd_departures)
+
+    fs = sub.add_parser("fetch-sea-ice", help="download OSI SAF OSI-401-b daily files")
+    fs.add_argument("--config", default=DEFAULT_CONFIG)
+    fs.add_argument("--start", type=date.fromisoformat, required=True)
+    fs.add_argument("--end", type=date.fromisoformat, required=True)
+    fs.add_argument("--root", default="data/raw")
+    fs.set_defaults(func=cmd_fetch_sea_ice)
+
+    bd = sub.add_parser("build-dataset", help="harmonise OSI SAF files onto the EPSG:3031 grid")
+    bd.add_argument("--config", default=DEFAULT_CONFIG)
+    bd.add_argument("--inputs", nargs="+", required=True, help="file globs, e.g. 'data/raw/sea_ice/**/*.nc'")
+    bd.add_argument("--out", default="data/processed/sea_ice.nc")
+    bd.add_argument("--resolution-km", type=float, default=None)
+    bd.set_defaults(func=cmd_build_dataset)
     return p
 
 
