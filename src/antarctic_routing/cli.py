@@ -534,6 +534,31 @@ def cmd_serve(args) -> int:
     return 0
 
 
+def cmd_brief(args) -> int:
+    import json
+    import tempfile
+
+    from antarctic_routing.brief import write_brief
+
+    cfg, grid, n_scen, o, d = _setup(args)
+    dep = args.departure or cfg.route.departure_start
+    world = generate_synthetic(cfg, grid, dep, _horizon_days(cfg), n_scen, seed=args.seed)
+    plan = plan_candidates(world, VesselModel.from_config(cfg), o, d, cfg.routing.risk_budget,
+                           cfg.routing.risk_weights, cfg.routing.risk_estimator, cfg.routing.connectivity,
+                           args.scenario_routes, cfg.routing.confidence, args.seed)
+    trust, limited = None, False
+    if args.trust_report:
+        report = json.loads(Path(args.trust_report).read_text())
+        trust = int(report["trust_horizon_days"])
+        limited = any(b.get("limited_by_max_lead") for b in report.get("by_baseline", {}).values())
+    with tempfile.TemporaryDirectory() as tmp:
+        png = plot_plan(world, plan, cfg.vessel.max_ice_concentration, Path(tmp) / "map.png",
+                        f"Route plan - departure {dep.isoformat()}")
+        out = write_brief(args.out, cfg, world, plan, png, trust, limited)
+    print(f"Wrote {out}: {plan.explanation}")
+    return 0
+
+
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="antroute", description=__doc__.splitlines()[0])
     p.add_argument("--version", action="version", version=f"antarctic-routing {__version__}")
@@ -667,6 +692,12 @@ def _parser() -> argparse.ArgumentParser:
     se.add_argument("--lambdas", type=float, nargs="+", default=[0, 1, 2, 4, 8, 16, 32])
     se.add_argument("--ks", type=float, nargs="+", default=[0.3, 0.5, 0.7, 0.9])
     se.set_defaults(func=cmd_sensitivity)
+
+    br = sub.add_parser("brief", help="PDF voyage brief for one departure")
+    common(br, "reports/voyage_brief.pdf")
+    br.add_argument("--departure", type=date.fromisoformat, default=None)
+    br.add_argument("--trust-report", default=None)
+    br.set_defaults(func=cmd_brief)
 
     sv = sub.add_parser("serve", help="run the API and dashboard")
     sv.add_argument("--config", default=DEFAULT_CONFIG)

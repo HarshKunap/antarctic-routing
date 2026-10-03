@@ -203,3 +203,12 @@ def test_sensitivity_cli_writes_grid_and_heatmap(tmp_path):
     out = json.loads((tmp_path / "sensitivity.json").read_text())
     assert len(out["grid"]) == 4 and out["baseline"]["lambda"] == 4.0
     assert (tmp_path / "sensitivity.png").is_file()
+
+
+def test_voyage_brief_pdf(tmp_path):
+    out = tmp_path / "brief.pdf"
+    rc = main(["brief", "--config", CONFIG, "--departure", "2027-01-10", *FAST, "--out", str(out)])
+    assert rc == 0
+    data = out.read_bytes()
+    assert data.startswith(b"%PDF")
+    assert data.count(b"/Type /Page") - data.count(b"/Type /Pages") >= 2
