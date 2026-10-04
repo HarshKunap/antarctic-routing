@@ -70,6 +70,25 @@ def _parse_bergs(args) -> list[tuple[str, float, float]]:
     return list(bergs.values())
 
 
+def _bergs_in_grid(bergs, grid) -> tuple[list, list]:
+    """``(inside, outside)`` the polar routing grid, so only bergs on the grid enter drift."""
+    from antarctic_routing.ingestion.icebergs import in_grid_mask
+
+    if not bergs:
+        return [], []
+    mask = in_grid_mask([b[1] for b in bergs], [b[2] for b in bergs], grid)
+    return [b for b, m in zip(bergs, mask, strict=True) if m], [b for b, m in zip(bergs, mask, strict=True) if not m]
+
+
+def _iceberg_source(args) -> dict | None:
+    """Provenance and quality flags of the whole USNIC file, including bergs outside the grid."""
+    if not getattr(args, "icebergs", None):
+        return None
+    from antarctic_routing.ingestion.icebergs import iceberg_provenance, read_iceberg_positions
+
+    return iceberg_provenance(args.icebergs, read_iceberg_positions(args.icebergs))
+
+
 def _plan_dict(plan, world, bergs=()) -> dict:
     return {
         "icebergs": [{"id": b[0], "lat": b[1], "lon": b[2]} for b in bergs],
@@ -393,24 +412,144 @@ def cmd_trust_horizon(args) -> int:
     return 0
 
 
+def _forcing_record(path, f, kind: str) -> dict:
+    from antarctic_routing.common.provenance import sha256_file
+
+    a = f.attrs
+    return {"forcing_file": str(path), "forcing_sha256": sha256_file(path), "product": kind,
+            "time_mode": f.wind_time_mode if kind == "ERA5" else f.current_time_mode,
+            "source_files": a.get("source_files"), "source_sha256": a.get("source_sha256"),
+            "averaging": a.get("averaging"), "crs": a.get("crs"), "resolution_m": a.get("resolution_m")}
+
+
+def _load_forcing_args(args, shape) -> dict:
+    """ForecastContext forcing kwargs from ``--forcing`` or the separate ``--wind-forcing``/``--current-forcing``.
+
+    A field that is not supplied stays schematic and is labelled so. A separate
+    file must contain the field it is given for; nothing is substituted silently.
+    """
+    from antarctic_routing.ingestion.forcing import load_forcing_fields
+
+    combined = getattr(args, "forcing", None)
+    wind_path, current_path = getattr(args, "wind_forcing", None), getattr(args, "current_forcing", None)
+    if combined and (wind_path or current_path):
+        raise ValueError("use either --forcing or --wind-forcing/--current-forcing, not both")
+    out = {"currents": None, "winds": None, "wind_times": None, "current_times": None,
+           "forcing_sources": {}, "forcing_provenance": {}}
+    picks = []
+    if combined:
+        picks = [(combined, "winds"), (combined, "currents")]
+    else:
+        picks = [(p, k) for p, k in ((wind_path, "winds"), (current_path, "currents")) if p]
+    for path, kind in picks:
+        f = load_forcing_fields(path, expected_shape=shape)
+        if kind == "winds":
+            if f.winds is None:
+                if combined:
+                    continue
+                raise ValueError(f"--wind-forcing {path} has no wind_x/wind_y")
+            out.update(winds=f.winds, wind_times=f.wind_times)
+            out["forcing_sources"]["winds"] = "ERA5 daily" if f.wind_times is not None else "ERA5 time-mean"
+            out["forcing_provenance"]["winds"] = _forcing_record(path, f, "ERA5")
+        else:
+            if f.currents is None:
+                if combined:
+                    continue
+                raise ValueError(f"--current-forcing {path} has no current_x/current_y")
+            out.update(currents=f.currents, current_times=f.current_times)
+            out["forcing_sources"]["currents"] = "CMEMS daily" if f.current_times is not None else "CMEMS time-mean"
+            out["forcing_provenance"]["currents"] = _forcing_record(path, f, "CMEMS")
+    return out
+
+
 def _forecast_context(args, ds, months, split, n_bank: int = 300):
     from antarctic_routing.forecasting.scenarios import ForecastContext
     from antarctic_routing.forecasting.train import unet_predictor
 
     model, meta = _load_checkpoint(args, ds)
     tc = meta["train_config"]
-    currents = winds = None
-    if getattr(args, "forcing", None):
-        from antarctic_routing.ingestion.forcing import load_forcing
-
-        currents, winds = load_forcing(args.forcing, expected_shape=ds["land_mask"].shape)
-        if currents is not None:
-            land = ds["land_mask"].values.astype(bool)
-            currents = (np.where(land, 0.0, currents[0]), np.where(land, 0.0, currents[1]))
+    forcing = _load_forcing_args(args, ds["land_mask"].shape)
+    if forcing["currents"] is not None:
+        land = ds["land_mask"].values.astype(bool)
+        c = forcing["currents"]
+        forcing["currents"] = (np.where(land, 0.0, c[0]), np.where(land, 0.0, c[1]))
     ctx = ForecastContext.build(ds, unet_predictor(model), tc["history_days"], tc["lead_days"], months,
-                                meta["train_seasons"], bank_size=n_bank, seed=args.seed,
-                                currents=currents, winds=winds)
+                                meta["train_seasons"], bank_size=n_bank, seed=args.seed, **forcing)
     return ctx, meta
+
+
+def _forcing_arg_summary(args):
+    """The forcing file argument(s) as given (unchanged string for the single ``--forcing`` form)."""
+    wind, current = getattr(args, "wind_forcing", None), getattr(args, "current_forcing", None)
+    if wind or current:
+        return {"wind_forcing": wind or "schematic (no --wind-forcing given)",
+                "current_forcing": current or "schematic (no --current-forcing given)"}
+    return args.forcing or "schematic (no --forcing given)"
+
+
+def _forcing_gate(args, ctx, ds) -> tuple[int | None, list[str]]:
+    """Exit code 2 when ``--require-real-forcing`` meets schematic/mixed forcing; otherwise the warnings to record.
+
+    Real sea-ice data run with schematic winds or currents is allowed (and labelled
+    ``mixed``/``schematic`` in the output) but is announced on stderr, never silent.
+    """
+    from antarctic_routing.forecasting.scenarios import forcing_status
+
+    src = ctx.forcing_sources
+    status = forcing_status(src)
+    if status == "real":
+        return None, []
+    problem = f"forcing is {status} (winds: {src.get('winds')}, currents: {src.get('currents')})"
+    if getattr(args, "require_real_forcing", False):
+        print(f"BLOCKED: {problem}; --require-real-forcing needs real winds and currents", file=sys.stderr)
+        return 2, []
+    if ds.attrs.get("execution_mode", "real") != "real":
+        return None, []
+    msg = f"real sea-ice data with {problem}; schematic fields are not real data"
+    print(f"WARNING: {msg}", file=sys.stderr)
+    return None, [msg]
+
+
+def _drift_kwargs(args) -> dict:
+    """Iceberg drift ensemble parameters for add_iceberg_hazard; defaults are the uncalibrated model."""
+    a = float(getattr(args, "drift_alpha_scale", 1.0))
+    return {"beta": float(getattr(args, "drift_beta", 1.0)), "alpha_range": (0.01 * a, 0.03 * a),
+            "spread_factor": float(getattr(args, "drift_spread_factor", 1.0))}
+
+
+def _selected_route(sweep, world) -> dict | None:
+    """Coordinates, evaluation and iceberg-presence statistics of the selected departure's route."""
+    opt = sweep.selected
+    if opt is None:
+        return None
+    plan = opt.plan
+    cand = plan.recommended or next((c for c in plan.candidates if "lowest_risk" in c.tags), None)
+    rows = np.array([c[0] for c in cand.route.cells])
+    cols = np.array([c[1] for c in cand.route.cells])
+    lat, lon = world.grid.lat2d[rows, cols], world.grid.lon2d[rows, cols]
+    out = {"departure": opt.departure.isoformat(), "labels": list(cand.labels),
+           "evaluation": cand.evaluation.summary(),
+           "max_segment_breach_prob": float(max(cand.evaluation.segment_breach_prob, default=0.0)),
+           "cells_row_col": [[int(r), int(c)] for r, c in zip(rows, cols, strict=True)],
+           "coordinates_lat_lon": [[round(float(a), 5), round(float(b), 5)] for a, b in zip(lat, lon, strict=True)]}
+    if world.berg is not None:
+        step = world.time_step_hours
+        first = int((opt.lead_days or 0) * 24 // step)
+        last = min(world.n_times - 1, int(((opt.lead_days or 0) * 24 + opt.expected_hours) // step))
+        dens = world.berg[:, first:last + 1].mean(0)                      # (T, ny, nx) member fraction
+        out["iceberg_presence_on_route"] = {
+            "layers": [first, last], "max_member_fraction_on_route_cells": float(dens[:, rows, cols].max()),
+            "route_cells_with_any_presence": int((dens[:, rows, cols] > 0).any(0).sum())}
+    return out
+
+
+def _iceberg_hazard_stats(world) -> dict | None:
+    if world.berg is None:
+        return None
+    dens = world.berg.mean(0)                                            # (T, ny, nx)
+    return {"cells_with_any_presence_per_layer": [int((d > 0).sum()) for d in dens],
+            "cells_with_presence_ge_5pct_per_layer": [int((d >= 0.05).sum()) for d in dens],
+            "max_member_fraction_per_layer": [float(d.max()) for d in dens]}
 
 
 def cmd_plan_window(args) -> int:
@@ -424,18 +563,21 @@ def cmd_plan_window(args) -> int:
 
     cfg, ds, months, split = _forecast_data(args)
     ctx, meta = _forecast_context(args, ds, months, split)
+    code, forcing_warnings = _forcing_gate(args, ctx, ds)
+    if code is not None:
+        return code
     trust = None
     if args.trust_report:
         trust = int(json.loads(Path(args.trust_report).read_text())["trust_horizon_days"])
     n_days = args.window_days + _horizon_days(cfg)
     world = ctx.scenarios(args.issue, n_days, args.members, np.random.default_rng(args.seed))
-    bergs = _parse_bergs(args)
+    grid = grid_of(ds)
+    bergs, outside = _bergs_in_grid(_parse_bergs(args), grid)
     if bergs:
         from antarctic_routing.iceberg.drift import add_iceberg_hazard
 
         world = add_iceberg_hazard(world, bergs, rng=np.random.default_rng(args.seed),
-                                   radius_m=args.berg_radius_km * 1e3)
-    grid = grid_of(ds)
+                                   radius_m=args.berg_radius_km * 1e3, **_drift_kwargs(args))
     o = grid.cell_of(cfg.route.origin.lat, cfg.route.origin.lon)
     d = grid.cell_of(cfg.route.destination.lat, cfg.route.destination.lon)
     sweep = plan_from_issue(
@@ -447,11 +589,28 @@ def cmd_plan_window(args) -> int:
     payload = {**sweep.to_dict(), "issue": args.issue.isoformat(), "trust_horizon_days": trust,
                "layer_source": world.layer_source, "n_members": world.n_scenarios,
                "forecast_lead_days": ctx.lead_days, "model_train_seasons": meta["train_seasons"],
-               "forcing": args.forcing or "schematic (no --forcing given)",
+               "forcing": _forcing_arg_summary(args),
+               "forcing_provenance": world.meta["forcing"],
                "icebergs": [{"id": b[0], "lat": b[1], "lon": b[2]} for b in bergs],
+               "icebergs_outside_grid": [{"id": b[0], "lat": b[1], "lon": b[2]} for b in outside],
+               "iceberg_source": _iceberg_source(args),
+               "iceberg_drift": {**_drift_kwargs(args), "radius_m": args.berg_radius_km * 1e3,
+                                 "drifted": bool(bergs)},
+               "iceberg_hazard": _iceberg_hazard_stats(world),
+               "selected_route": _selected_route(sweep, world),
                "execution_mode": world.execution_mode, "data_description": world.description,
                "disclaimer": DISCLAIMER}
+    if forcing_warnings:
+        payload["warnings"] = forcing_warnings
     write_json_artifact(out / "plan_window.json", payload)
+    if args.export_maps:
+        from antarctic_routing.publish import iceberg_tracks, map_layers, write_compact_json
+
+        maps = map_layers(world, VesselModel.from_config(cfg).tau)
+        if bergs:
+            drift = _drift_kwargs(args)
+            maps["iceberg_tracks"] = iceberg_tracks(world, bergs, args.seed, args.berg_radius_km * 1e3, **drift)
+        write_compact_json(out / "forecast_maps.json", maps)
     plot_departures(sweep, cfg.routing.risk_budget, out / "departure_window.png",
                     f"Departure window from forecast issued {args.issue} ({world.n_scenarios} joint scenarios)",
                     issue=args.issue, forecast_days=ctx.lead_days, trust_horizon_days=trust)
@@ -461,6 +620,11 @@ def cmd_plan_window(args) -> int:
         print(f"  {flag}+{opt.lead_days:2d} d {opt.departure}  UB {opt.p_breach_upper:6.1%}  "
               f"E[t] {opt.expected_hours:5.1f} h  {opt.support}{trusted}")
     print(sweep.explanation)
+    if bergs or outside:
+        print(f"Icebergs: {len(bergs)} of {len(bergs) + len(outside)} inside the routing grid drifted; "
+              f"{len(outside)} outside it excluded")
+    fm = world.meta["forcing"]
+    print(f"Forcing: {fm['label']} ({fm['status']})")
     return 0
 
 
@@ -476,6 +640,9 @@ def cmd_replay(args) -> int:
 
     cfg, ds, months, split = _forecast_data(args)
     ctx, meta = _forecast_context(args, ds, months, split)
+    code, forcing_warnings = _forcing_gate(args, ctx, ds)
+    if code is not None:
+        return code
     trust = int(json.loads(Path(args.trust_report).read_text())["trust_horizon_days"]) if args.trust_report else None
     grid = grid_of(ds)
     o = grid.cell_of(cfg.route.origin.lat, cfg.route.origin.lon)
@@ -489,6 +656,8 @@ def cmd_replay(args) -> int:
                         np.random.default_rng(args.seed), audit_path=audit, trust_horizon_days=trust,
                         connectivity=cfg.routing.connectivity, scenario_routes=args.scenario_routes, seed=args.seed)
     result["model_train_seasons"] = meta["train_seasons"]
+    if forcing_warnings:
+        result["forcing_warnings"] = forcing_warnings
     from antarctic_routing.preprocessing.climatology import season_of
 
     replay_season = season_of(args.start, months)
@@ -517,6 +686,9 @@ def cmd_backtest(args) -> int:
 
     cfg, ds, months, split = _forecast_data(args)
     ctx, meta = _forecast_context(args, ds, months, split)
+    code, forcing_warnings = _forcing_gate(args, ctx, ds)
+    if code is not None:
+        return code
     seasons = args.seasons or split["test"]
     starts = []
     for s in seasons:
@@ -531,6 +703,8 @@ def cmd_backtest(args) -> int:
                           args.members, policy, cfg.routing.risk_weights, _horizon_days(cfg),
                           buffer_km=args.buffer_km, seed=args.seed, scenario_routes=args.scenario_routes,
                           connectivity=cfg.routing.connectivity)
+    if forcing_warnings:
+        result["forcing_warnings"] = forcing_warnings
     out = Path(args.out)
     write_json_artifact(out / "backtest.json", result)
     with (out / "backtest_voyages.csv").open("w", newline="") as fh:
@@ -571,12 +745,18 @@ def cmd_sensitivity(args) -> int:
 
 
 def cmd_serve(args) -> int:
+    import logging
+    import os
+
     import uvicorn
 
     from antarctic_routing.api.main import create_app
 
+    logging.basicConfig(level=os.environ.get("ANTROUTE_LOG_LEVEL", "INFO").upper(),
+                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     print(f"Serving dashboard and API on http://{args.host}:{args.port}  (docs: /docs)")
-    uvicorn.run(create_app(args.config), host=args.host, port=args.port, log_level="info")
+    # one worker process: jobs and voyages are held in this process's memory
+    uvicorn.run(create_app(args.config, args.artifacts_dir), host=args.host, port=args.port, log_level="info")
     return 0
 
 
@@ -612,11 +792,15 @@ def cmd_fetch_forcing(args) -> int:
     cfg = load_config(args.config)
     root = Path(args.root)
     jobs = []
+    grid = PolarGrid.from_domain(cfg.domain, args.resolution_km or cfg.grid.resolution_km)
     if not args.skip_era5:
-        jobs.append(("era5", era5.request_for(cfg.domain, args.start, args.end), era5.make_fetcher(cfg.domain)))
+        margin = era5.AREA_MARGIN_DEG if args.era5_margin_deg is None else args.era5_margin_deg
+        jobs.append(("era5", era5.request_for(cfg.domain, args.start, args.end, grid, margin),
+                     era5.make_fetcher(cfg.domain, grid, margin)))
     if not args.skip_cmems:
-        jobs.append(("cmems", cmems.request_for(cfg.domain, args.start, args.end, args.cmems_dataset),
-                     cmems.make_fetcher(cfg.domain, args.cmems_dataset)))
+        margin = cmems.AREA_MARGIN_DEG if args.cmems_margin_deg is None else args.cmems_margin_deg
+        jobs.append(("cmems", cmems.request_for(cfg.domain, args.start, args.end, args.cmems_dataset, grid, margin),
+                     cmems.make_fetcher(cfg.domain, args.cmems_dataset, grid, margin)))
     results = []
     for name, req, fetch in jobs:
         res = run_download(req, root, fetch)
@@ -634,14 +818,17 @@ def cmd_build_forcing(args) -> int:
     t0, started = time.time(), utc_now()
     cfg = load_config(args.config)
     grid = PolarGrid.from_domain(cfg.domain, args.resolution_km or cfg.grid.resolution_km)
-    ds = build_forcing(grid, era5_path=args.era5, cmems_path=args.cmems)
+    ds = build_forcing(grid, era5_path=args.era5, cmems_path=args.cmems, wind_time_mode=args.wind_time_mode,
+                       current_time_mode=args.current_time_mode)
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     ds.to_netcdf(out)
     inputs = [file_record(Path(p), name) for p, name in ((args.era5, "ERA5"), (args.cmems, "CMEMS")) if p]
     stage = StageResult(
         stage="harmonise_forcing", status="passed", execution_mode="real", software=SOFTWARE, inputs=inputs,
-        parameters={"resolution_km": grid.resolution_m / 1000, "averaging": ds.attrs["averaging"]},
+        parameters={"resolution_km": grid.resolution_m / 1000, "averaging": ds.attrs["averaging"],
+                    **({"wind_time_mode": args.wind_time_mode} if args.era5 else {}),
+                    **({"current_time_mode": args.current_time_mode} if args.cmems else {})},
         outputs=[file_record(out, "forcing fields")],
         metrics={k: v for k, v in ds.attrs.items() if k.endswith("filled_fraction")},
         command=" ".join(["antroute", *args.argv]), started_at=started, finished_at=utc_now(),
@@ -704,6 +891,12 @@ def _parser() -> argparse.ArgumentParser:
     ff.add_argument("--end", type=date.fromisoformat, required=True)
     ff.add_argument("--root", default="data/raw")
     ff.add_argument("--cmems-dataset", default="cmems_mod_glo_phy_my_0.083deg_P1D-m")
+    ff.add_argument("--resolution-km", type=float, default=None,
+                    help="routing grid whose full lat/lon extent the ERA5 area must cover (default: config)")
+    ff.add_argument("--era5-margin-deg", type=float, default=None,
+                    help="margin around the grid extent for the ERA5 area, degrees (default 0.5)")
+    ff.add_argument("--cmems-margin-deg", type=float, default=None,
+                    help="margin around the grid extent for the CMEMS subset box, degrees (default 0.5)")
     ff.add_argument("--skip-era5", action="store_true")
     ff.add_argument("--skip-cmems", action="store_true")
     ff.set_defaults(func=cmd_fetch_forcing)
@@ -713,6 +906,10 @@ def _parser() -> argparse.ArgumentParser:
     bf.add_argument("--era5", default=None)
     bf.add_argument("--cmems", default=None)
     bf.add_argument("--resolution-km", type=float, default=None)
+    bf.add_argument("--wind-time-mode", choices=("mean", "daily"), default="mean",
+                    help="ERA5 wind: one time mean (default) or UTC-daily means with a time axis")
+    bf.add_argument("--current-time-mode", choices=("mean", "daily"), default="mean",
+                    help="CMEMS currents: one time mean (default) or UTC-daily means with a time axis")
     bf.add_argument("--out", default="data/processed/forcing.nc")
     bf.set_defaults(func=cmd_build_forcing)
 
@@ -730,6 +927,10 @@ def _parser() -> argparse.ArgumentParser:
         sp.add_argument("--n-test", type=int, default=3)
         sp.add_argument("--seed", type=int, default=42)
         sp.add_argument("--forcing", default=None, help="forcing.nc from build-forcing (real winds/currents)")
+        sp.add_argument("--wind-forcing", default=None,
+                        help="build-forcing file whose winds (2-D or daily) are used; not with --forcing")
+        sp.add_argument("--current-forcing", default=None,
+                        help="build-forcing file whose currents (2-D or daily) are used; not with --forcing")
 
     tf = sub.add_parser("train-forecast", help="train the sea-ice U-Net")
     forecast_common(tf)
@@ -774,6 +975,16 @@ def _parser() -> argparse.ArgumentParser:
     pw.add_argument("--iceberg", action="append", metavar="ID:LAT:LON", help="tracked iceberg (repeatable)")
     pw.add_argument("--icebergs", default=None, help="USNIC iceberg list CSV (latest position per berg)")
     pw.add_argument("--berg-radius-km", type=float, default=10.0)
+    pw.add_argument("--drift-beta", type=float, default=1.0,
+                    help="iceberg current coupling beta (default 1 = uncalibrated)")
+    pw.add_argument("--drift-alpha-scale", type=float, default=1.0,
+                    help="multiplies the iceberg wind-coefficient range 0.01-0.03 (default 1)")
+    pw.add_argument("--drift-spread-factor", type=float, default=1.0,
+                    help="iceberg ensemble spread about its mean (default 1 = uncalibrated)")
+    pw.add_argument("--require-real-forcing", action="store_true",
+                    help="exit with code 2 unless both winds and currents come from real forcing files")
+    pw.add_argument("--export-maps", action="store_true",
+                    help="also write forecast_maps.json (per-layer maps for the API/dashboard)")
     pw.add_argument("--out", default="reports/window")
     pw.set_defaults(func=cmd_plan_window)
 
@@ -786,6 +997,8 @@ def _parser() -> argparse.ArgumentParser:
     rp.add_argument("--members", type=int, default=200)
     rp.add_argument("--scenario-routes", type=int, default=1)
     rp.add_argument("--trust-report", default=None)
+    rp.add_argument("--require-real-forcing", action="store_true",
+                    help="exit with code 2 unless both winds and currents come from real forcing files")
     rp.add_argument("--out", default="reports/replay")
     rp.set_defaults(func=cmd_replay)
 
@@ -800,6 +1013,8 @@ def _parser() -> argparse.ArgumentParser:
     bt.add_argument("--members", type=int, default=120)
     bt.add_argument("--buffer-km", type=float, default=50.0)
     bt.add_argument("--scenario-routes", type=int, default=0)
+    bt.add_argument("--require-real-forcing", action="store_true",
+                    help="exit with code 2 unless both winds and currents come from real forcing files")
     bt.add_argument("--out", default="reports/backtest")
     bt.set_defaults(func=cmd_backtest)
 
@@ -820,6 +1035,8 @@ def _parser() -> argparse.ArgumentParser:
     sv.add_argument("--config", default=DEFAULT_CONFIG)
     sv.add_argument("--host", default="127.0.0.1")
     sv.add_argument("--port", type=int, default=8000)
+    sv.add_argument("--artifacts-dir", default=None,
+                    help="verified real-data bundle to serve read-only (default: $ANTROUTE_ARTIFACTS_DIR)")
     sv.set_defaults(func=cmd_serve)
     return p
 

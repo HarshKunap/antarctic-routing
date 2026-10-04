@@ -4,8 +4,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Antarctic Ice-Risk Routing</title>
+  <!-- Empty = same origin as this page (served by the API). For a separately hosted dashboard,
+       frontend/build.mjs fills in ANTROUTE_API_BASE; list the dashboard's origin in ANTROUTE_CORS_ORIGINS. -->
+  <meta name="antroute-api-base" content="">
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="static/style.css">
 </head>
 <body>
 <div class="viz-root">
@@ -15,21 +18,82 @@
       <p class="sub">Risk-budgeted route &amp; departure planning under forecast uncertainty</p>
     </div>
     <div class="badges">
-      <span class="badge" id="mode-badge">CONTROLLED-SYNTHETIC DATA</span>
+      <span class="badge" id="mode-badge">LOADING DATA STATUS</span>
       <span class="badge muted" id="version-badge">v?</span>
     </div>
   </header>
   <p class="disclaimer" id="disclaimer"></p>
 
   <nav class="tabs" role="tablist">
-    <button role="tab" aria-selected="true" data-tab="plan">Route plan</button>
-    <button role="tab" aria-selected="false" data-tab="window">Departure window</button>
-    <button role="tab" aria-selected="false" data-tab="voyage">Voyage &amp; replanning</button>
-    <button role="tab" aria-selected="false" data-tab="validation">Validation</button>
+    <button role="tab" aria-selected="true" data-tab="real">Real-data demo</button>
+    <button role="tab" aria-selected="false" data-tab="plan">Route plan (synthetic)</button>
+    <button role="tab" aria-selected="false" data-tab="window">Departure window (synthetic)</button>
+    <button role="tab" aria-selected="false" data-tab="voyage">Voyage &amp; replanning (synthetic)</button>
+    <button role="tab" aria-selected="false" data-tab="validation">Validation figures</button>
   </nav>
 
+  <!-- ===================== REAL ===================== -->
+  <section class="tab" id="tab-real">
+    <div class="card" id="real-unavailable" hidden>
+      <h2><span class="badge status-unavailable">Unavailable</span> No real-data results are being served</h2>
+      <p class="verdict" id="real-reason"></p>
+      <p class="sub">The backend publishes precomputed real-data runs as a verified bundle
+        (<code>ANTROUTE_ARTIFACTS_DIR</code>). Nothing synthetic is shown in its place.</p>
+    </div>
+    <div id="real-content" hidden>
+      <div class="card">
+        <h2>Data status</h2>
+        <p class="sub" id="real-bundle"></p>
+        <ul class="sources" id="real-sources"></ul>
+      </div>
+      <div class="grid2">
+        <div class="card map-card">
+          <div class="card-head">
+            <h2 id="real-map-title">Sea ice and selected route</h2>
+            <div class="legend" id="real-map-legend"></div>
+          </div>
+          <label class="layer">Day <input type="range" id="real-layer" min="0" max="0" value="0">
+            <output id="real-layer-out">–</output></label>
+          <canvas id="real-map" width="760" height="640" aria-label="Real-data route map"></canvas>
+          <div class="tooltip" id="real-map-tip" hidden></div>
+          <div class="ramp"><span>0%</span><div class="ramp-bar"></div><span id="real-ramp-label">100%</span>
+            <span><i class="box missing-box"></i> no data</span></div>
+        </div>
+        <div class="card">
+          <h2>Result <span class="badge status-forecast">Forecast</span></h2>
+          <p class="verdict" id="real-verdict"></p>
+          <div class="table-wrap"><table class="data" id="real-summary"><tbody></tbody></table></div>
+          <h3>Limitations (read before use)</h3>
+          <ol class="limits" id="real-limits"></ol>
+        </div>
+      </div>
+      <div class="card">
+        <h2>95% upper bound on P(breach) by departure date <span class="badge status-forecast">Forecast</span></h2>
+        <p class="verdict" id="real-window-verdict"></p>
+        <canvas id="real-window-chart" width="1100" height="320" aria-label="Real-data departure window chart"></canvas>
+        <div class="tooltip" id="real-window-tip" hidden></div>
+      </div>
+      <div class="grid2">
+        <div class="card">
+          <h2>Icebergs <span class="badge" id="real-berg-badge"></span></h2>
+          <p class="sub" id="real-berg-source"></p>
+          <div class="table-wrap"><table class="data" id="real-bergs">
+            <thead><tr><th>Iceberg</th><th class="num">Lat</th><th class="num">Lon</th><th>Ensemble-mean drift (forecast)</th></tr></thead>
+            <tbody></tbody></table></div>
+        </div>
+        <div class="card">
+          <h2>Provenance</h2>
+          <div class="table-wrap"><table class="data" id="real-prov"><tbody></tbody></table></div>
+          <p><a id="real-prov-link" href="#" target="_blank" rel="noopener">Full provenance (JSON)</a></p>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <!-- ===================== PLAN ===================== -->
-  <section class="tab" id="tab-plan">
+  <section class="tab" id="tab-plan" hidden>
+    <p class="synthetic-note"><span class="badge status-schematic">Schematic</span> Controlled-synthetic scenarios on a
+      schematic world. Not real ice, winds, currents or coastline.</p>
     <form class="controls" id="plan-form">
       <label>Departure <input type="date" name="departure" value="2026-12-24" required></label>
       <label>Scenarios <input type="number" name="scenarios" value="200" min="1" max="1000"></label>
@@ -67,6 +131,8 @@
 
   <!-- ===================== WINDOW ===================== -->
   <section class="tab" id="tab-window" hidden>
+    <p class="synthetic-note"><span class="badge status-schematic">Schematic</span> Controlled-synthetic scenarios on a
+      schematic world. Not real ice, winds, currents or coastline.</p>
     <form class="controls" id="window-form">
       <label>From <input type="date" name="start" value="2026-11-26" required></label>
       <label>To <input type="date" name="end" value="2027-01-05" required></label>
@@ -90,6 +156,8 @@
 
   <!-- ===================== VOYAGE ===================== -->
   <section class="tab" id="tab-voyage" hidden>
+    <p class="synthetic-note"><span class="badge status-schematic">Schematic</span> Controlled-synthetic scenarios on a
+      schematic world. Not real ice, winds, currents or coastline.</p>
     <div class="grid2">
       <div class="card">
         <h2>Voyage</h2>
@@ -116,11 +184,12 @@
 
   <!-- ===================== VALIDATION ===================== -->
   <section class="tab" id="tab-validation" hidden>
+    <p class="synthetic-note"><span class="badge" id="figs-badge"></span> <span id="figs-note"></span></p>
     <p class="sub">Figures produced by the CLI (<code>evaluate-forecast</code>, <code>calibrate-forecast</code>,
       <code>trust-horizon</code>, <code>replay</code>, <code>backtest</code>, <code>sensitivity</code>).</p>
     <div class="figs" id="figs"></div>
   </section>
 </div>
-<script src="/static/app.js"></script>
+<script src="static/app.js"></script>
 </body>
 </html>

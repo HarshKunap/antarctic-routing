@@ -46,7 +46,8 @@ def _truth_world(ctx: ForecastContext, day: date, n_days: int) -> ScenarioSet:
         n += 1
     conc = ctx.ds["ice_concentration"].values[t: t + n][None].astype(np.float32)
     shape = conc.shape[2:]
-    cx, cy = ctx.currents
+    daily = ctx.current_layers(day, n)      # daily currents by exact date; 2-D currents repeat as before
+    cx, cy = ctx.currents if daily is None else daily
     return ScenarioSet(
         grid=grid_of(ctx.ds), start=datetime(day.year, day.month, day.day), time_step_hours=24.0,
         land=ctx.ds["land_mask"].values.astype(bool), conc=conc,

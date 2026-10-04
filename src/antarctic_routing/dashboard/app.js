@@ -2,6 +2,9 @@
 "use strict";
 
 const $ = (sel) => document.querySelector(sel);
+// API location: same origin unless <meta name="antroute-api-base"> names another (separately hosted dashboard).
+const API_BASE = (document.querySelector('meta[name="antroute-api-base"]')?.content || "").replace(/\/$/, "");
+const apiUrl = (path) => API_BASE + path;
 const css = (name) => getComputedStyle(document.querySelector(".viz-root")).getPropertyValue(name).trim();
 const SERIES = ["--series-1", "--series-2", "--series-3", "--series-4", "--series-5", "--series-6", "--series-7", "--series-8"];
 const ICE_RAMP = ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"];
@@ -9,7 +12,7 @@ const pct = (v, d = 1) => (v == null || !isFinite(v) ? "–" : (100 * v).toFixed
 const num = (v, d = 0) => (v == null || !isFinite(v) ? "–" : Number(v).toFixed(d));
 
 async function api(path, opts = {}) {
-  const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
+  const res = await fetch(apiUrl(path), { headers: { "Content-Type": "application/json" }, ...opts });
   const text = await res.text();
   let body;
   try { body = JSON.parse(text); } catch { body = text; }
@@ -45,18 +48,49 @@ function fitCanvas(canvas) {
   return { ctx, w, h };
 }
 
+/* ------------------------------------------------------- data status */
+const STATUS_TEXT = { real: "Real", historical: "Historical", forecast: "Forecast", schematic: "Schematic",
+  unavailable: "Unavailable" };
+function statusBadge(status) {
+  const s = STATUS_TEXT[status] ? status : "unavailable";
+  return el("span", { class: "badge status-" + s }, STATUS_TEXT[s]);
+}
+const currentTab = () => document.querySelector('.tabs button[aria-selected="true"]').dataset.tab;
+
+function setModeBadge(tab) {
+  const b = $("#mode-badge"), st = window.__status;
+  let status = "schematic", text = "CONTROLLED-SYNTHETIC DATA";
+  if (!st) { status = "unavailable"; text = "DATA STATUS UNKNOWN"; }
+  else if (tab === "real") {
+    const ok = st.real_data.status === "available";
+    status = ok ? "historical" : "unavailable";
+    text = ok ? "REAL DATA · HISTORICAL REPLAY" : "REAL DATA UNAVAILABLE";
+  } else if (tab === "validation") {
+    const real = (window.__figsMode || st.figures.execution_mode) === "real";
+    status = real ? "real" : "schematic";
+    text = real ? "REAL-DATA FIGURES" : "CONTROLLED-SYNTHETIC FIGURES";
+  }
+  b.className = "badge status-" + status;
+  b.textContent = text;
+}
+
 /* ------------------------------------------------------------- tabs */
 document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("click", () => {
   document.querySelectorAll(".tabs button").forEach((x) => x.setAttribute("aria-selected", String(x === b)));
   document.querySelectorAll(".tab").forEach((s) => { s.hidden = s.id !== "tab-" + b.dataset.tab; });
   if (b.dataset.tab === "validation") loadFigures();
+  if (b.dataset.tab === "real") redrawReal();
+  if (b.dataset.tab === "plan" && mapState.plan) drawMap(mapState.plan);
+  if (b.dataset.tab === "window" && winState.result) drawWindow(winState.result, budget());
+  setModeBadge(b.dataset.tab);
 }));
+const budget = () => (window.__config ? window.__config.routing.risk_budget : 0.05);
 
 /* ------------------------------------------------------------- map */
 const mapState = { plan: null, toScreen: null, screenRoutes: [] };
 
-function drawMap(plan) {
-  const canvas = $("#map");
+function drawMap(plan, canvasSel = "#map", st = mapState, legendSel = "#map-legend") {
+  const canvas = $(canvasSel);
   const { ctx, w, h } = fitCanvas(canvas);
   const m = plan.map;
   const c = Math.cos(m.rotation_rad), s = Math.sin(m.rotation_rad);
@@ -70,7 +104,7 @@ function drawMap(plan) {
   const e0 = pad - scale * minx + ((w - 2 * pad) - scale * (maxx - minx)) / 2;
   const f0 = pad + scale * maxy + ((h - 2 * pad) - scale * (maxy - miny)) / 2;
   const toScreen = (x, y) => { const [rx, ry] = rot(x, y); return [e0 + scale * rx, f0 - scale * ry]; };
-  mapState.toScreen = toScreen;
+  st.toScreen = toScreen;
 
   ctx.fillStyle = css("--surface-1");
   ctx.fillRect(0, 0, w, h);
@@ -78,11 +112,14 @@ function drawMap(plan) {
   // raster: one pixel per grid cell, row 0 of the grid is the bottom of the image
   const img = new ImageData(m.nx, m.ny);
   const land = hexToRgb(css("--land")), berg = hexToRgb(css("--berg")), surf = hexToRgb(css("--surface-1"));
+  const missing = hexToRgb(css("--missing"));
+  let anyMissing = false;
   for (let j = 0; j < m.ny; j++) {
     for (let i = 0; i < m.nx; i++) {
       const k = j * m.nx + i, o = ((m.ny - 1 - j) * m.nx + i) * 4;
       let rgb = surf, a = 255;
       if (m.land[k]) rgb = land;
+      else if (m.p_ice[k] == null) { rgb = missing; anyMissing = true; }   // no data is never open water
       else if (m.p_ice[k] > 0) rgb = rampColor(m.p_ice[k]);
       if (!m.land[k] && m.p_berg && m.p_berg[k] >= 5) {
         const f = 0.35 + 0.5 * Math.min(1, m.p_berg[k] / 50);
@@ -104,7 +141,7 @@ function drawMap(plan) {
   ctx.restore();
 
   // routes: non-recommended first, recommended last and thicker
-  mapState.screenRoutes = [];
+  st.screenRoutes = [];
   const order = plan.candidates.map((_, i) => i).sort((a, b) => (a === plan.recommended_index) - (b === plan.recommended_index));
   for (const i of order) {
     const cand = plan.candidates[i];
@@ -117,15 +154,16 @@ function drawMap(plan) {
     ctx.setLineDash(cand.feasible ? [] : [6, 4]);
     strokePath(ctx, pts);
     ctx.setLineDash([]);
-    mapState.screenRoutes.push({ i, pts });
+    st.screenRoutes.push({ i, pts });
   }
-  marker(ctx, toScreen(...plan.origin_xy_km), css("--series-3"), "Origin");
-  marker(ctx, toScreen(...plan.destination_xy_km), css("--series-4"), "Destination");
+  if (plan.origin_xy_km) marker(ctx, toScreen(...plan.origin_xy_km), css("--series-3"), "Origin");
+  if (plan.destination_xy_km) marker(ctx, toScreen(...plan.destination_xy_km), css("--series-4"), "Destination");
 
-  const legend = $("#map-legend");
+  const legend = $(legendSel);
   legend.replaceChildren(
-    el("span", {}, el("i", { class: "box", style: `background:${css("--land")}` }), "Land (schematic)"),
+    el("span", {}, el("i", { class: "box", style: `background:${css("--land")}` }), plan.land_label || "Land (schematic)"),
     ...(m.p_berg ? [el("span", {}, el("i", { class: "box", style: `background:${css("--berg")}` }), "Iceberg presence")] : []),
+    ...(anyMissing ? [el("span", {}, el("i", { class: "box", style: `background:${css("--missing")}` }), "No data")] : []),
     el("span", {}, el("i", { style: "border-top-style:dashed;border-color:" + css("--muted") }), "Exceeds budget"),
   );
 }
@@ -150,20 +188,21 @@ function distToSegment(px, py, [x1, y1], [x2, y2]) {
   return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
 }
 
-$("#map").addEventListener("pointermove", (ev) => {
-  const tip = $("#map-tip");
-  if (!mapState.plan) return;
+function attachMapTip(canvasSel, tipSel, st) {
+$(canvasSel).addEventListener("pointermove", (ev) => {
+  const tip = $(tipSel);
+  if (!st.plan) return;
   const rect = ev.target.getBoundingClientRect();
   const px = ev.clientX - rect.left, py = ev.clientY - rect.top;
   let best = null;
-  for (const r of mapState.screenRoutes) {
+  for (const r of st.screenRoutes) {
     for (let k = 1; k < r.pts.length; k++) {
       const d = distToSegment(px, py, r.pts[k - 1], r.pts[k]);
       if (d < 10 && (!best || d < best.d)) best = { d, i: r.i };
     }
   }
   if (!best) { tip.hidden = true; return; }
-  const cand = mapState.plan.candidates[best.i];
+  const cand = st.plan.candidates[best.i];
   tip.replaceChildren(
     el("strong", {}, cand.labels.join(", ")),
     row("P(breach)", pct(cand.p_breach)), row("95% upper bound", pct(cand.p_breach_upper)),
@@ -174,7 +213,9 @@ $("#map").addEventListener("pointermove", (ev) => {
   tip.style.top = (py + 40) + "px";
   tip.hidden = false;
 });
-$("#map").addEventListener("pointerleave", () => { $("#map-tip").hidden = true; });
+$(canvasSel).addEventListener("pointerleave", () => { $(tipSel).hidden = true; });
+}
+attachMapTip("#map", "#map-tip", mapState);
 
 function row(label, value) { return el("div", { class: "row" }, el("span", {}, label), el("b", {}, value)); }
 
@@ -227,8 +268,8 @@ $("#plan-form").addEventListener("submit", async (ev) => {
 /* ------------------------------------------------------------- window */
 const winState = { result: null, bars: [] };
 
-function drawWindow(result, budget) {
-  const canvas = $("#window-chart");
+function drawWindow(result, budget, canvasSel = "#window-chart", st = winState) {
+  const canvas = $(canvasSel);
   const { ctx, w, h } = fitCanvas(canvas);
   const opts = result.options;
   const left = 52, right = 12, top = 16, bottom = 46;
@@ -244,7 +285,7 @@ function drawWindow(result, budget) {
     ctx.fillText(pct(v, 0), 8, yy + 4);
   }
   const bw = (w - left - right) / opts.length;
-  winState.bars = [];
+  st.bars = [];
   opts.forEach((o, k) => {
     const x = left + k * bw + bw * 0.15, bwid = bw * 0.7, v = Math.min(1, o.p_breach_upper);
     ctx.fillStyle = o.feasible ? css("--good") : css("--critical");
@@ -258,7 +299,7 @@ function drawWindow(result, budget) {
     ctx.fillStyle = css("--muted");
     ctx.save(); ctx.translate(x + bwid / 2, h - bottom + 12); ctx.rotate(-0.6);
     ctx.fillText(o.departure.slice(5), -18, 8); ctx.restore();
-    winState.bars.push({ x, w: bwid, o });
+    st.bars.push({ x, w: bwid, o });
   });
   ctx.strokeStyle = css("--text-primary"); ctx.setLineDash([5, 4]);
   ctx.beginPath(); ctx.moveTo(left, y(budget)); ctx.lineTo(w - right, y(budget)); ctx.stroke(); ctx.setLineDash([]);
@@ -267,7 +308,7 @@ function drawWindow(result, budget) {
   ctx.fillRect(left + 2, y(budget) - 17, ctx.measureText(label).width + 6, 14);
   ctx.fillStyle = css("--text-primary"); ctx.fillText(label, left + 5, y(budget) - 6);
   if (result.selected) {
-    const b = winState.bars.find((q) => q.o.departure === result.selected);
+    const b = st.bars.find((q) => q.o.departure === result.selected);
     if (b) {
       ctx.fillStyle = css("--text-primary");
       ctx.fillText("▼ selected", b.x + b.w / 2 - 26, Math.max(top + 10, y(Math.min(1, b.o.p_breach_upper)) - 18));
@@ -275,18 +316,21 @@ function drawWindow(result, budget) {
   }
 }
 
-$("#window-chart").addEventListener("pointermove", (ev) => {
-  const tip = $("#window-tip");
+function attachWindowTip(canvasSel, tipSel, st) {
+$(canvasSel).addEventListener("pointermove", (ev) => {
+  const tip = $(tipSel);
   const rect = ev.target.getBoundingClientRect();
   const px = ev.clientX - rect.left;
-  const b = winState.bars.find((q) => px >= q.x - 4 && px <= q.x + q.w + 4);
+  const b = st.bars.find((q) => px >= q.x - 4 && px <= q.x + q.w + 4);
   if (!b) { tip.hidden = true; return; }
   tip.replaceChildren(el("strong", {}, b.o.departure), row("95% upper bound", pct(b.o.p_breach_upper)),
     row("P(breach)", pct(b.o.p_breach)), row("Expected time", num(b.o.expected_hours, 1) + " h"),
     row("Fuel index", num(b.o.expected_fuel)), row("Status", b.o.feasible ? "✓ meets budget" : "✕ exceeds budget"));
   tip.style.left = Math.min(px + 14, rect.width - 200) + "px"; tip.style.top = "60px"; tip.hidden = false;
 });
-$("#window-chart").addEventListener("pointerleave", () => { $("#window-tip").hidden = true; });
+$(canvasSel).addEventListener("pointerleave", () => { $(tipSel).hidden = true; });
+}
+attachWindowTip("#window-chart", "#window-tip", winState);
 
 $("#window-form").addEventListener("submit", async (ev) => {
   ev.preventDefault();
@@ -299,8 +343,7 @@ $("#window-form").addEventListener("submit", async (ev) => {
       scenarios: Number(f.get("scenarios")), resolution_km: 25 }) });
     if (job.status !== "done") throw new Error(job.error || "sweep failed");
     winState.result = job.result;
-    const budget = window.__config ? window.__config.routing.risk_budget : 0.05;
-    drawWindow(job.result, budget);
+    drawWindow(job.result, budget());
     $("#window-verdict").textContent = job.result.explanation + " Rule: " + job.result.rule + ".";
     $("#window-table tbody").replaceChildren(...job.result.options.map((o) => el("tr", {},
       el("td", {}, o.departure), el("td", {}, statusPill(o.feasible)), el("td", { class: "num" }, pct(o.p_breach_upper)),
@@ -346,7 +389,7 @@ $("#voyage-form").addEventListener("submit", async (ev) => {
     setRoute(v.route);
     $("#replan-btn").disabled = false;
     for (const [id, fmt] of [["#export-geojson", "geojson"], ["#export-csv", "csv"]]) {
-      const a = $(id); a.href = `/voyages/${voyage.id}/export?format=${fmt}`; a.hidden = false;
+      const a = $(id); a.href = apiUrl(`/voyages/${voyage.id}/export?format=${fmt}`); a.hidden = false;
     }
     status.textContent = "Voyage " + voyage.id + " · " + v.explanation;
     await refreshLog();
@@ -375,11 +418,152 @@ async function loadFigures() {
   if (box.dataset.loaded) return;
   try {
     const figs = await api("/figures");
+    window.__figsMode = figs.execution_mode;
+    const real = figs.execution_mode === "real";
+    $("#figs-badge").replaceWith(Object.assign(statusBadge(real ? "real" : "schematic"), { id: "figs-badge" }));
+    $("#figs-note").textContent = real ? "Figures from real-data runs." :
+      "These figures come from controlled-synthetic runs, not real conditions.";
+    setModeBadge(currentTab());
     box.replaceChildren(...figs.figures.map((fig) => el("figure", {},
-      el("img", { src: fig.url, alt: fig.caption, loading: "lazy" }), el("figcaption", {}, fig.caption))));
+      el("img", { src: apiUrl(fig.url), alt: fig.caption, loading: "lazy" }), el("figcaption", {}, fig.caption))));
     if (!figs.figures.length) box.replaceChildren(el("p", { class: "sub" }, "No figures yet - run the CLI reports."));
     box.dataset.loaded = "1";
   } catch (e) { box.replaceChildren(el("p", {}, "Could not load figures: " + e.message)); }
+}
+
+/* ------------------------------------------------------------- real data */
+// Everything here is read from the backend's verified real-data bundle; the page computes nothing.
+const realState = { plan: null, toScreen: null, screenRoutes: [], layers: {}, route: null, dates: null, k: 0,
+  tracks: null };
+const realWinState = { result: null, bars: [] };
+attachMapTip("#real-map", "#real-map-tip", realState);
+attachWindowTip("#real-window-chart", "#real-window-tip", realWinState);
+const short = (h) => (h ? String(h).slice(0, 12) + "…" : "–");
+
+function showRealUnavailable(reason) {
+  $("#real-unavailable").hidden = false;
+  $("#real-content").hidden = true;
+  $("#real-reason").textContent = reason;
+}
+
+function kv(rows) {
+  return rows.map(([k, v]) => el("tr", {}, el("th", {}, k), el("td", {}, v)));
+}
+
+async function showRealLayer(k) {
+  const info = realState.dates.layers[k];
+  const observed = k === 0 && info.source === "observed";
+  if (!realState.layers[k]) realState.layers[k] = await api(observed ? "/real/sea-ice" : `/real/forecast-map?layer=${k}`);
+  const L = realState.layers[k], g = L.grid, route = realState.route, xy = route.xy_km || [];
+  const ev = route.evaluation || {};
+  realState.k = k;
+  realState.plan = {
+    map: { nx: g.nx, ny: g.ny, res_km: g.res_km, x0_km: g.x0_km, y0_km: g.y0_km, rotation_rad: g.rotation_rad,
+      land: L.land, p_ice: observed ? L.concentration_pct : L.p_ice_ge_limit_pct, p_berg: observed ? null : L.p_berg_pct },
+    candidates: xy.length ? [{ ...ev, xy_km: xy, labels: [`selected route, departing ${route.departure}`], feasible: true }] : [],
+    recommended_index: xy.length ? 0 : null,
+    origin_xy_km: xy[0], destination_xy_km: xy[xy.length - 1],
+    land_label: "Land (sea-ice product mask; not a navigational coastline)",
+  };
+  if (!$("#tab-real").hidden) { drawMap(realState.plan, "#real-map", realState, "#real-map-legend"); drawTracks(); }
+  $("#real-layer-out").textContent = `${info.date} · ${observed ? "observed (Historical)" : info.source + " (Forecast)"}`;
+  $("#real-ramp-label").textContent = observed ? "100% observed concentration"
+    : `100% P(ice ≥ ${pct(L.tau, 0)}) across ${L.n_members} members`;
+}
+
+// Ensemble-mean iceberg drift (forecast) up to the shown day; a hollow ring marks the position on that day.
+function drawTracks() {
+  const tracks = realState.tracks;
+  if (!tracks || !tracks.length || !realState.toScreen) return;
+  const ctx = $("#real-map").getContext("2d"), col = css("--berg");
+  ctx.save();
+  ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]);
+  for (const t of tracks) {
+    const pts = t.daily_mean.filter((d) => d.layer <= realState.k && d.x_km != null)
+      .map((d) => realState.toScreen(d.x_km, d.y_km));
+    if (!pts.length) continue;
+    strokePath(ctx, pts);
+    const [x, y] = pts[pts.length - 1];
+    ctx.setLineDash([]);
+    ctx.beginPath(); ctx.arc(x, y, 4, 0, 2 * Math.PI); ctx.stroke();
+    ctx.font = "10px system-ui, sans-serif"; ctx.fillText(t.id, x + 6, y + 3);
+    ctx.setLineDash([4, 3]);
+  }
+  ctx.restore();
+  const legend = $("#real-map-legend");
+  if (!legend.querySelector(".track-key")) {
+    legend.append(el("span", { class: "track-key" }, el("i", { style: `border-top-style:dashed;border-color:${col}` }),
+      "Iceberg mean drift (forecast)"));
+  }
+}
+
+function redrawReal() {
+  if (realState.plan) { drawMap(realState.plan, "#real-map", realState, "#real-map-legend"); drawTracks(); }
+  if (realWinState.result) drawWindow(realWinState.result, realWinState.result.risk_budget, "#real-window-chart", realWinState);
+}
+
+async function loadReal(status) {
+  const real = status.real_data;
+  if (real.status !== "available") { showRealUnavailable(real.reason || "The real-data bundle is unavailable."); return; }
+  const [route, win, bergs, dates, prov] = await Promise.all([api("/real/route"), api("/real/departure-window"),
+    api("/real/icebergs"), api("/real/forecast-dates"), api("/provenance")]);
+  $("#real-unavailable").hidden = true;
+  $("#real-content").hidden = false;
+  $("#real-bundle").textContent = `Bundle ${real.bundle_id} · forecast issued ${real.issue} · execution mode ` +
+    `"${real.execution_mode}". Historical replay with real inputs; not a live forecast.`;
+  $("#real-sources").replaceChildren(...real.sources.map((s) => el("li", {}, statusBadge(s.status),
+    el("span", { class: "src-name" }, s.name.replace(/_/g, " ")), el("span", {}, s.label))));
+  $("#real-limits").replaceChildren(...(real.limitations || []).map((t) => el("li", {}, t)));
+
+  realState.route = route; realState.dates = dates; realState.tracks = bergs.tracks;
+  const ev = route.evaluation || {}, pres = route.iceberg_presence_on_route || {};
+  $("#real-verdict").textContent = route.explanation || "";
+  $("#real-summary tbody").replaceChildren(...kv(route.selected ? [
+    ["Selected departure", route.selected],
+    ["Expected time", `${num(ev.expected_hours, 1)} h (p10–p90 ${num(ev.hours_p10, 2)}–${num(ev.hours_p90, 2)})`],
+    ["Expected fuel index", num(ev.expected_fuel, 1)],
+    ["Distance", `${num(ev.distance_km, 1)} km`],
+    ["Breaches", `${ev.breaches} of ${ev.n_scenarios} joint scenarios`],
+    ["P(breach) 95% upper bound", `${pct(ev.p_breach_upper, 2)} (budget ${pct(win.risk_budget, 0)})`],
+    ["Route cells with iceberg presence", `${pres.route_cells_with_any_presence ?? "–"} of ${(route.cells_row_col || []).length}`],
+  ] : [["Selected departure", "none met the risk budget"]]));
+
+  realWinState.result = win;
+  $("#real-window-verdict").textContent = `${win.explanation} Rule: ${win.rule}.`;
+
+  const src = bergs.source || {};
+  $("#real-berg-badge").replaceWith(Object.assign(statusBadge(bergs.status), { id: "real-berg-badge" }));
+  $("#real-berg-source").textContent = `${src.source || "–"}, list of ${(src.update_dates || []).join(", ")} ` +
+    `(${src.filename || "–"}). Drift: beta ${bergs.drift?.beta}, spread factor ${bergs.drift?.spread_factor}, ` +
+    `radius ${num((bergs.drift?.radius_m || 0) / 1000)} km.`;
+  $("#real-bergs tbody").replaceChildren(
+    ...bergs.drifted.map((b) => {
+      const tr = (bergs.tracks || []).find((t) => t.id === b.id), end = tr && tr.daily_mean[tr.daily_mean.length - 1];
+      const drift = end && end.lat != null ? ` → day ${end.layer}: ${num(end.lat, 2)}, ${num(end.lon, 2)} ` +
+        `(±${num(end.spread_p90_km)} km p90)` : "";
+      return el("tr", {}, el("td", {}, b.id), el("td", { class: "num" }, num(b.lat, 2)),
+        el("td", { class: "num" }, num(b.lon, 2)), el("td", {}, "drifted" + drift));
+    }),
+    el("tr", {}, el("td", { colspan: "4" }, `${bergs.outside_grid.length} more outside the routing grid (not drifted)`)));
+
+  const man = prov.manifest || {}, env = man.environment || {}, b = prov.bundle || {};
+  $("#real-prov tbody").replaceChildren(...kv([
+    ["Bundle", `${b.bundle_id} (created ${b.created_utc})`],
+    ["Plan output (canonical sha256)", short(b.plan_window_canonical_sha256)],
+    ["Forecast model", `${man.sea_ice?.forecast_model?.id || "–"} · ${short(man.sea_ice?.forecast_model?.sha256)}`],
+    ...Object.entries(man.inputs || {}).map(([k, v]) => [`Input: ${k}`, `${short(v.sha256)} ${v.verified ? "✓ verified" : ""}`]),
+    ["Code", `${short(env.git_commit)}${env.worktree_dirty ? " + uncommitted changes" : ""}`],
+    ["Python / torch", `${env.python || "–"} / ${(env.packages || {}).torch || "–"}`],
+  ]));
+  $("#real-prov-link").href = apiUrl("/provenance");
+
+  const slider = $("#real-layer");
+  slider.max = String(dates.layers.length - 1);
+  slider.value = "0";
+  slider.addEventListener("input", () => showRealLayer(Number(slider.value)).catch((e) => {
+    $("#real-layer-out").textContent = "Error: " + e.message; }));
+  await showRealLayer(0);
+  redrawReal();
 }
 
 /* ------------------------------------------------------------- boot */
@@ -390,9 +574,18 @@ async function loadFigures() {
     $("#version-badge").textContent = "v" + h.version;
     const c = await api("/config");
     window.__config = c.config;
-  } catch (e) { $("#disclaimer").textContent = "API unavailable: " + e.message; }
+    window.__status = await api("/status");
+  } catch (e) {
+    $("#disclaimer").textContent = "API unavailable: " + e.message;
+    showRealUnavailable("API unavailable: " + e.message);
+  }
+  setModeBadge(currentTab());
+  if (window.__status) {
+    try { await loadReal(window.__status); } catch (e) { showRealUnavailable("Could not load real data: " + e.message); }
+  }
   window.addEventListener("resize", () => {
-    if (mapState.plan) drawMap(mapState.plan);
-    if (winState.result) drawWindow(winState.result, window.__config ? window.__config.routing.risk_budget : 0.05);
+    if (mapState.plan && !$("#tab-plan").hidden) drawMap(mapState.plan);
+    if (winState.result && !$("#tab-window").hidden) drawWindow(winState.result, budget());
+    if (!$("#tab-real").hidden) redrawReal();
   });
 })();
