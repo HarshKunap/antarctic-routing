@@ -40,15 +40,19 @@ def client():
             os.environ["ANTROUTE_DATA_ROOT"] = old
 
 
-def test_status_and_dates_cover_six_seasons(client):
+def test_status_and_dates_cover_seven_seasons(client):
     st = client.get("/real/historical/status").json()
     assert st["status"] == "available" and st["label"] == "Real Historical Data"
     assert "reanalysis" in st["hindsight_forcing"]
     d = client.get("/real/historical/dates").json()
-    assert (len(d["route_dates"]), len(d["window_dates"])) == (596, 521)
+    old = lambda ds: [x for x in ds if x < "2024-06-01"]                             # noqa: E731
+    assert (len(old(d["route_dates"])), len(old(d["window_dates"]))) == (596, 521)   # the six frozen-file seasons
+    assert (len(d["route_dates"]), len(d["window_dates"])) == (596 + 101, 521 + 88)
     seasons = d["seasons"]["window"]
-    assert [s["season"] for s in seasons] == ["2018-19", "2019-20", "2020-21", "2021-22", "2022-23", "2023-24"]
-    assert [s["out_of_sample"] for s in seasons] == [False, False, False, False, True, True]
+    assert [s["season"] for s in seasons] == ["2018-19", "2019-20", "2020-21", "2021-22", "2022-23", "2023-24",
+                                              "2024-25"]
+    assert [s["out_of_sample"] for s in seasons] == [False, False, False, False, True, True, True]
+    assert [s["independent_evaluation"] for s in seasons] == [False] * 6 + [True]
 
 
 def test_route_reproduces_the_frozen_selected_route(client):
@@ -107,3 +111,200 @@ def test_voyage_replan_and_replay_with_icebergs(client):
     assert res["iceberg_hazard"] is True and res["departure"] == "2023-11-14" and res["arrived"] is True
     assert {"berg_footprint_cells", "berg_min_distance_km"} <= res["truth"]["planner"].keys()
     assert res["map"]["observed_date"] == "2023-11-14" and len(res["observed_bergs"]) == 7
+
+
+def test_presets_resolve_on_the_real_routing_grid(client):
+    body = client.get("/real/locations").json()
+    rows = {p["id"]: p for p in body["presets"]}
+    assert all(p["available"] for p in rows.values())
+    assert [k for k, p in rows.items() if p["snapped"]] == ["rothera"]      # only Rothera is on a 25 km land cell
+    assert (rows["drake_passage"]["resolved"]["row"], rows["drake_passage"]["resolved"]["col"]) == (29, 12)
+    assert (rows["bransfield_strait"]["resolved"]["row"], rows["bransfield_strait"]["resolved"]["col"]) == (29, 47)
+
+
+def test_a_chosen_route_plans_between_the_resolved_cells_with_its_own_horizon(client):
+    body = {"issue": "2023-11-14", "origin": {"preset": "drake_passage"}, "destination": {"preset": "palmer_station"}}
+    rs = client.post("/real/locations/resolve", json=body).json()
+    assert rs["horizon"]["horizon_days"] == 7 and rs["coverage"]["route"]["ok"]
+    r = client.post("/real/historical/routes?wait=true", json=body).json()
+    assert r["status"] == "done", r.get("error")
+    res = r["result"]
+    assert res["route"] == {k: rs[k] for k in ("origin", "destination", "horizon")}
+    rec = res["candidates"][res["recommended_index"]]
+    for end, ll in (("origin", rec["latlon"][0]), ("destination", rec["latlon"][-1])):
+        assert ll == [rs[end]["resolved"]["lat"], rs[end]["resolved"]["lon"]]
+    assert res["data_label"] == "Real Historical Data"
+
+
+PLAN = {"origin": {"preset": "drake_passage"}, "destination": {"preset": "bransfield_strait"}, "issue": "2023-11-14"}
+
+
+def test_plan_reproduces_the_frozen_run_in_one_call_and_is_deterministic(client):
+    r = client.post("/real/plan", json=PLAN)
+    assert r.status_code == 200, r.text
+    j, exp = r.json(), FROZEN["expected"]
+    rt = j["route"]
+    assert j["status"] == "recommended" and j["departure"]["recommended"] == "2023-11-14" == rt["departure_date"]
+    assert (rt["expected_hours"], rt["fuel_index"]["expected"], rt["distance_km"]) == \
+        (exp["expected_hours"], exp["expected_fuel"], exp["distance_km"])
+    assert (j["risk"]["combined"]["p_breach_upper"], j["risk"]["combined"]["breaches"]) == \
+        (exp["p_breach_upper"], exp["breaches"])
+    assert len(rt["latlon"]) == exp["route_cells"] and rt["eta_utc"] == "2023-11-15T13:30Z"
+    keys = ("departure", "feasible", "expected_hours", "expected_fuel", "p_breach", "p_breach_upper", "lead_days",
+            "forecast_fraction", "support")
+    assert [{k: o[k] for k in keys} for o in j["departure"]["options"]] == \
+        [{k: o[k] for k in keys} for o in FROZEN_WINDOW["options"]]
+    risk = j["risk"]
+    assert risk["combined"]["breaches"] == risk["sea_ice"]["breaches"] + risk["iceberg_only_increment"]["breaches"]
+    m = j["metadata"]
+    assert m["mode"] == "historical" and m["hindsight_forcing"] is True and "reanalysis" in m["hindsight_disclosure"]
+    assert m["banners"] == ["HISTORICAL MODE", "ERA5/CMEMS hindsight forcing",
+                            "Research estimate, not certified navigation"]
+    assert m["provenance"]["forecast_model"]["sha256"] == SPEC["inputs"]["checkpoint"]["sha256"]
+    assert j["icebergs"]["list_date"] == "2023-11-09" and len(j["iceberg_tracks"]) == 7
+    assert [d["date"] for d in j["daily"]] == ["2023-11-14", "2023-11-15"]
+    assert client.post("/real/plan", json=PLAN).content == r.content               # deterministic
+    coords = client.post("/real/plan", json={**PLAN, "origin": {"lat": -56.3, "lon": -66.0},
+                                             "destination": {"lat": -63.0, "lon": -59.0}}).json()
+    assert coords["route"] == rt and coords["risk"] == risk
+
+
+def test_plan_to_rothera_snaps_and_never_hides_an_infeasible_window(client):
+    j = client.post("/real/plan", json={**PLAN, "destination": {"preset": "rothera"}}).json()
+    assert j["locations"]["destination"]["snapped"] is True and j["horizon"]["horizon_days"] == 9
+    assert j["metadata"]["scenario_days"] == 14 + 9
+    assert j["status"] == "no_feasible_departure"          # heavy ice: the least risky option, flagged
+    assert j["departure"]["recommended"] is None and j["route"]["recommended"] is False
+    assert j["risk"]["combined"]["within_budget"] is False
+    risk = j["risk"]
+    assert risk["combined"]["breaches"] >= max(risk["sea_ice"]["breaches"], risk["iceberg"]["breaches"])
+    assert j["daily"] and j["daily"][0]["date"] == j["route"]["departure_date"]
+
+
+def test_plan_refuses_invalid_locations_and_uncovered_dates(client):
+    r = client.post("/real/plan", json={**PLAN, "origin": {"preset": "mcmurdo"}})
+    assert r.status_code == 422 and r.json()["detail"]["status"] == "invalid_location"
+    r = client.post("/real/plan", json={**PLAN, "issue": "2024-02-20"})
+    assert r.status_code == 422 and "past the end of the season" in r.json()["detail"]["reason"]
+
+
+# ------------------------------------------------------------------ S4: voyage simulation
+def _simulate(client, body):
+    r = client.post("/real/simulate?wait=true", json=body).json()
+    assert r["status"] == "done", r.get("error")
+    return r["result"]
+
+
+def test_simulation_sails_the_frozen_plan_and_needs_no_replan(client):
+    body = {"origin": {"preset": "drake_passage"}, "destination": {"preset": "bransfield_strait"},
+            "issue": "2023-11-14", "departure": "2023-11-14"}
+    s = _simulate(client, body)
+    assert s["status"] == "simulated" and s["metadata"]["execution_mode"] == "real"
+    f0, last = s["frames"][0], s["frames"][-1]
+    assert f0["forecast"]["route_ahead"]["expected_hours"] == pytest.approx(37.503171114273826, abs=1e-9)
+    assert f0["forecast"]["risk"]["combined"]["p_breach_upper"] == pytest.approx(0.018845326377266575)
+    assert [f["date"] for f in s["frames"]] == ["2023-11-14", "2023-11-15", "2023-11-15"]
+    assert [f["phase"] for f in s["frames"]] == ["departure", "at_sea", "arrived"]
+    assert s["frames"][1]["decision"]["action"] == "keep"
+    u = s["summary"]
+    assert u["arrived"] and u["replans"] == 0 and u["replan_note"] == "No replan was required during this voyage."
+    assert u["sailed"]["distance_km"] == pytest.approx(837.75, abs=0.01)
+    assert u["sailed"]["observed_breach_cells"] == 0 and u["sailed"]["berg_nearest"] == "A76B"
+    assert [last["position"]["row"], last["position"]["col"]] == s["plan"]["route"]["cells"][-1]
+    assert _simulate(client, body) == s                                                  # deterministic
+
+
+def test_simulation_shows_a_real_replan_from_the_existing_rules(client):
+    """Drake Passage -> Bransfield Strait, forecast issued 2019-01-30 (found by the S4 replan search)."""
+    body = {"origin": {"preset": "drake_passage"}, "destination": {"preset": "bransfield_strait"},
+            "issue": "2019-01-30"}
+    s = _simulate(client, body)
+    assert s["status"] == "simulated" and s["metadata"]["departure_date"] == "2019-02-12"
+    assert s["plan"]["status"] == "no_feasible_departure"
+    rep = [e for e in s["events"] if e["type"] == "replan"]
+    assert len(rep) == 1 and s["summary"]["replans"] == 1 and s["summary"]["arrived"]
+    e = rep[0]
+    assert e["triggers"] == ["material_fuel_saving"] and e["issued"] == "2019-02-13"
+    assert e["change"]["expected_fuel"] == pytest.approx(-40.274, abs=0.01)
+    assert e["change"]["distance_km"] == pytest.approx(-41.602, abs=0.01)
+    assert e["new_route"]["p_breach_upper"] <= 0.05 and e["deviation_km"] == 50.0
+    f = s["frames"][e["frame"]]
+    assert f["replanned"] and f["route"]["cells"] == e["new_route"]["cells"] != e["old_route"]["cells"]
+
+
+# ------------------------------------------------------------------ 2024-25 (S5: registered additional season)
+DB = {"origin": {"preset": "drake_passage"}, "destination": {"preset": "bransfield_strait"}, "window_days": 14}
+
+
+def test_2024_25_is_discoverable_with_its_supported_range(client):
+    d = client.get("/real/historical/dates?origin=drake_passage&destination=bransfield_strait").json()
+    s = d["seasons"]["window"][-1]
+    assert (s["season"], s["first"], s["last"], s["n_dates"]) == ("2024-25", "2024-11-14", "2025-02-09", 88)
+    assert (s["forecast_model"], s["iceberg_drift"]) == ("independent_evaluation", "independent_evaluation")
+    assert s["out_of_sample"] and s["in_sample_notes"] == [] and len(s["evaluation_notes"]) == 2
+    new = [x for x in d["window_dates"] if x >= "2024-11-01"]
+    assert new[0] == "2024-11-14" and new[-1] == "2025-02-09" and len(new) == 88
+
+
+@pytest.mark.parametrize("issue", ["2024-11-14", "2024-12-27", "2025-02-09"])
+def test_2024_25_plans_on_real_sea_ice_forcing_and_icebergs(client, issue):
+    r = client.post("/real/plan", json={**DB, "issue": issue})
+    assert r.status_code == 200, r.text
+    p = r.json()
+    m = p["metadata"]
+    pv = m["provenance"]
+    assert p["status"] == "recommended" and m["execution_mode"] == "real" and m["data_status"] == "historical"
+    assert m["banners"][:3] == ["HISTORICAL MODE", "ERA5/CMEMS hindsight forcing",
+                                "Research estimate, not certified navigation"]
+    assert pv["sea_ice"]["file"] == "sea_ice_25km_2024_25.nc"
+    assert pv["sea_ice"]["sha256"] == SPEC["inputs"]["sea_ice_additional"][0]["sha256"]
+    assert "OSI-430-a v3.0" in pv["sea_ice"]["source"] and pv["sea_ice"]["observed_through"] == issue
+    assert pv["forecast_model"]["sha256"] == SPEC["inputs"]["checkpoint"]["sha256"]
+    assert pv["season"]["season"] == "2024-25" and pv["season"]["independent_evaluation"]
+    files = {k: [f["file"] for f in v["files"]] for k, v in pv["forcing"].items()}
+    assert files["winds"] and all(f.startswith("forcing_era5_daily_25km_202") for f in files["winds"])
+    assert files["currents"] == ["forcing_cmems_daily_25km_20241101-20250228.nc"]
+    assert pv["icebergs"]["file"].startswith("AntarcticIcebergs_202") and pv["icebergs"]["list_date"] <= issue
+    assert pv["icebergs"]["age_days"] <= 14 and pv["icebergs"]["drifted"]
+    assert p["route"]["distance_km"] == pytest.approx(837.75, abs=0.01)
+
+
+def test_2024_25_forecasts_use_real_daily_forcing_never_schematic():
+    from datetime import date
+
+    from antarctic_routing.config import load_config
+    from antarctic_routing.historical import HistoricalArchive
+    a = HistoricalArchive.load(REAL_DATA, REPO / "config" / "real_historical.json",
+                               load_config(CONFIG).project.season_months)
+    assert (a.winds.product, a.currents.product) == ("ERA5", "CMEMS")
+    assert a.winds.missing(date(2024, 11, 1), 120) == [] and a.currents.missing(date(2024, 11, 1), 120) == []
+    assert a.winds.missing(date(2025, 2, 28), 2) == ["2025-03-01"]          # no forcing after the season: refused
+    assert a.ds.attrs["execution_mode"] == "real"
+    assert [f["file"] for f in a.sea_ice_files] == ["sea_ice_25km.nc", "sea_ice_25km_2024_25.nc"]
+    assert str(a.ds["time"].values[-1])[:10] == "2025-02-28" and len(a.days) == 2403 + 120
+
+
+def test_2024_25_refuses_unsupported_dates_with_the_reason(client):
+    for issue, why in (("2024-11-13", "14 contiguous in-season days"),
+                       ("2025-02-10", "daily ERA5 winds are missing"),
+                       ("2025-03-05", "not in the sea-ice archive"),
+                       ("2024-06-15", "not in the sea-ice archive")):
+        r = client.post("/real/plan", json={**DB, "issue": issue})
+        assert r.status_code == 422 and r.json()["detail"]["status"] == "out_of_coverage", issue
+        assert why in r.json()["detail"]["reason"], issue
+        assert client.post("/real/simulate?wait=true", json={**DB, "issue": issue}).status_code == 422
+
+
+def test_2024_25_plan_and_simulation_are_deterministic(client):
+    body = {**DB, "issue": "2024-11-14"}
+    p1 = client.post("/real/plan", json=body).json()
+    assert client.post("/real/plan", json=body).json() == p1
+    s = _simulate(client, {**body, "departure": "2024-11-14"})
+    assert s["status"] == "simulated" and s["metadata"]["provenance"]["sea_ice"]["file"] == "sea_ice_25km_2024_25.nc"
+    assert [f["date"] for f in s["frames"]] == ["2024-11-14", "2024-11-15", "2024-11-15"]
+    assert [f["phase"] for f in s["frames"]] == ["departure", "at_sea", "arrived"]
+    u = s["summary"]
+    assert u["arrived"] and u["replans"] == 0 and u["replan_note"] == "No replan was required during this voyage."
+    assert u["sailed"]["distance_km"] == pytest.approx(837.75, abs=0.01) and u["sailed"]["observed_breach_cells"] == 0
+    assert s["frames"][1]["observed"]["icebergs"]["file"].startswith("AntarcticIcebergs_2024")
+    assert _simulate(client, {**body, "departure": "2024-11-14"}) == s

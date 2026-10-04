@@ -61,7 +61,11 @@ function setModeBadge(tab) {
   const b = $("#mode-badge"), st = window.__status;
   let status = "schematic", text = "CONTROLLED-SYNTHETIC DATA";
   if (!st) { status = "unavailable"; text = "DATA STATUS UNKNOWN"; }
-  else if (tab === "real") {
+  else if (tab === "product") {
+    const ok = st.historical && st.historical.status === "available";
+    status = ok ? "historical" : "unavailable";
+    text = ok ? "REAL HISTORICAL DATA · HINDSIGHT FORCING" : "REAL HISTORICAL DATA UNAVAILABLE";
+  } else if (tab === "real") {
     const ok = st.real_data.status === "available";
     status = ok ? "historical" : "unavailable";
     text = ok ? "REAL DATA · HISTORICAL REPLAY" : "REAL DATA UNAVAILABLE";
@@ -86,6 +90,8 @@ document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("cli
   document.querySelectorAll(".tab").forEach((s) => { s.hidden = s.id !== "tab-" + b.dataset.tab; });
   if (b.dataset.tab === "validation") loadFigures();
   if (b.dataset.tab === "real") redrawReal();
+  if (b.dataset.tab === "product") { drawProduct(); drawSimMap(); }
+  if (b.dataset.tab !== "product") simPause();
   if (b.dataset.tab === "plan" && mapState.plan) drawMap(mapState.plan);
   if (b.dataset.tab === "window" && winState.result) drawWindow(winState.result, budget());
   if (isHist(b.dataset.tab)) redrawHist(b.dataset.tab);
@@ -103,7 +109,9 @@ function drawMap(plan, canvasSel = "#map", st = mapState, legendSel = "#map-lege
   const c = Math.cos(m.rotation_rad), s = Math.sin(m.rotation_rad);
   const rot = (x, y) => [x * c - y * s, x * s + y * c];
   const X1 = m.x0_km + m.nx * m.res_km, Y1 = m.y0_km + m.ny * m.res_km;
-  const corners = [[m.x0_km, m.y0_km], [X1, m.y0_km], [m.x0_km, Y1], [X1, Y1]].map(([x, y]) => rot(x, y));
+  // plan.focus_xy_km (optional): zoom to these points plus a margin instead of the whole grid
+  const corners = plan.focus_xy_km && plan.focus_xy_km.length ? focusBox(plan.focus_xy_km.map(([x, y]) => rot(x, y)))
+    : [[m.x0_km, m.y0_km], [X1, m.y0_km], [m.x0_km, Y1], [X1, Y1]].map(([x, y]) => rot(x, y));
   const minx = Math.min(...corners.map((p) => p[0])), maxx = Math.max(...corners.map((p) => p[0]));
   const miny = Math.min(...corners.map((p) => p[1])), maxy = Math.max(...corners.map((p) => p[1]));
   const pad = 8;
@@ -173,6 +181,12 @@ function drawMap(plan, canvasSel = "#map", st = mapState, legendSel = "#map-lege
     ...(anyMissing ? [el("span", {}, el("i", { class: "box", style: `background:${css("--missing")}` }), "No data")] : []),
     el("span", {}, el("i", { style: "border-top-style:dashed;border-color:" + css("--muted") }), "Exceeds budget"),
   );
+}
+
+function focusBox(pts) {
+  const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
+  const pad = Math.max(150, 0.25 * Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)));
+  return [[Math.min(...xs) - pad, Math.min(...ys) - pad], [Math.max(...xs) + pad, Math.max(...ys) + pad]];
 }
 
 function strokePath(ctx, pts) {
@@ -632,7 +646,8 @@ function seasonOf(kind, day) {
 function seasonText(s) {
   if (!s) return { text: "", warn: false };
   if (s.out_of_sample) {
-    return { text: `${s.season} season: out-of-sample for the sea-ice U-Net and the iceberg drift calibration.`,
+    return { text: `${s.season} season: out-of-sample for the sea-ice U-Net and the iceberg drift calibration.` +
+      (s.independent_evaluation ? ` Independent evaluation season: ${s.evaluation_notes.join("; ")}.` : ""),
       warn: false };
   }
   return { text: `${s.season} season is in-sample: ${s.in_sample_notes.join("; ")}. Results here are not ` +
@@ -670,7 +685,8 @@ async function loadHistoricalDates() {
     const input = form.querySelector('input[type="date"]');
     const dates = kind === "route" ? d.route_dates : d.window_dates;
     sel.replaceChildren(...seasons.map((s) => el("option", { value: s.first },
-      `${s.season} · ${s.out_of_sample ? "out-of-sample" : "in-sample"} · ${s.n_dates} dates`)));
+      `${s.season} · ${s.out_of_sample ? "out-of-sample" : "in-sample"}${s.independent_evaluation ?
+        " · independent evaluation" : ""} · ${s.n_dates} dates`)));
     input.min = dates[0];
     input.max = dates[dates.length - 1];
     const pick = seasons.find((s) => s.season === "2023-24") || seasons[seasons.length - 1];
@@ -951,6 +967,907 @@ function redrawHist(tab) {
   if (tab === "hvoyage") { drawHistMap("#hvoyage-map", hVoyState, "#hvoyage-map-legend"); drawReplay(); }
 }
 
+/* ------------------------------------------------------------- product: Plan Route */
+// One judge-facing flow: origin, destination and date from the API's own lists, one POST /real/plan, one result.
+// The page draws what /real/plan returns and nothing else: no risk, route or forecast is computed here, and no
+// synthetic data is ever shown in place of a missing or failed result.
+const prod = { locations: null, dates: null, datesKey: null, result: null, day: 0, view: "plan", busy: false,
+  controller: null, timer: null, lastBody: null };
+const prMapState = { plan: null, toScreen: null, screenRoutes: [], tracks: null, k: 0 };
+const prWinState = { result: null, bars: [] };
+attachMapTip("#pr-map", "#pr-map-tip", prMapState);
+attachWindowTip("#pr-window-chart", "#pr-window-tip", prWinState);
+const PLAN_TIMEOUT_MS = 180000;
+const PLAN_STATUSES = ["recommended", "no_feasible_departure", "no_route"];
+
+const fmtHours = (h) => {
+  if (h == null || !isFinite(h)) return "–";
+  const d = Math.floor(h / 24), r = h - 24 * d;
+  return d ? `${num(h, 1)} h (${d} d ${num(r, 1)} h)` : `${num(h, 1)} h`;
+};
+const fmtUtc = (iso) => {
+  if (!iso) return "–";
+  const t = new Date(iso.length === 17 ? iso.replace("Z", ":00Z") : iso);   // "2023-11-15T13:30Z"
+  if (isNaN(t)) return iso;
+  return t.toLocaleString("en-GB", { timeZone: "UTC", day: "numeric", month: "short", year: "numeric",
+    hour: "2-digit", minute: "2-digit" }) + " UTC";
+};
+const fmtDay = (d) => {
+  const t = new Date(d + "T00:00:00Z");
+  return isNaN(t) ? d : t.toLocaleDateString("en-GB", { timeZone: "UTC", weekday: "short", day: "numeric", month: "short" });
+};
+const ll = (p) => (p && p.lat != null ? `${num(p.lat, 3)}°, ${num(p.lon, 3)}°` : "–");
+const pctOf = (count, n) => (n ? `${count} of ${n} scenarios` : "–");
+
+/* ---- API errors, in words a person can act on */
+class PlanError extends Error {
+  constructor(title, text, hint = "") { super(text); this.title = title; this.hint = hint; }
+}
+
+function describeFailure(status, body) {
+  const d = body && typeof body === "object" ? body.detail : null;
+  const reason = d && typeof d === "object" && !Array.isArray(d) ? d.reason : typeof d === "string" ? d : "";
+  if (status === 422 && d && d.status === "invalid_location") {
+    return new PlanError("This origin or destination cannot be routed", reason,
+      "Pick another preset. Locations must be on the 25 km routing grid and within reach of open water.");
+  }
+  if (status === 422 && d && d.status === "out_of_coverage") {
+    return new PlanError("The archive does not cover this date for this route", reason,
+      "Pick another date from the supported range shown under the form. Longer routes need more covered days.");
+  }
+  if (status === 422 && Array.isArray(d)) {
+    return new PlanError("The request was not accepted", d.map((e) => `${(e.loc || []).slice(1).join(".")}: ${e.msg}`)
+      .join("; "), "Check the form fields and try again.");
+  }
+  if (status === 503) {
+    return new PlanError("The real historical model is unavailable right now",
+      reason || (typeof body === "string" ? body : "The server could not run the model."),
+      "Nothing synthetic is shown in its place. If the server is busy, try again shortly.");
+  }
+  return new PlanError(`The server answered with an error (HTTP ${status})`,
+    reason || (typeof body === "string" ? body.slice(0, 300) : "No reason was given."), "Try again.");
+}
+
+async function planFetch(path, opts = {}) {
+  let res;
+  try {
+    res = await fetch(apiUrl(path), { headers: { "Content-Type": "application/json" }, ...opts });
+  } catch (e) {
+    if (e.name === "AbortError") throw e;
+    throw new PlanError("Could not reach the planning server", "The request did not reach the API (network error).",
+      "Check that the API is running and reachable, then try again.");
+  }
+  const text = await res.text();
+  let body = null;
+  try { body = JSON.parse(text); } catch { body = text; }
+  if (!res.ok) throw describeFailure(res.status, body);
+  if (!body || typeof body !== "object") {
+    throw new PlanError("The server's answer could not be read", "The response was not JSON.",
+      "No result is shown. Try again; if it persists, the API may be misconfigured.");
+  }
+  return body;
+}
+
+// Only a complete, labelled real-historical result is drawn; anything else is reported, not patched.
+function checkPlan(p) {
+  const bad = (why) => new PlanError("The server's answer could not be read", `Malformed /real/plan response: ${why}.`,
+    "No result is shown and nothing is substituted. Try again.");
+  if (!p || typeof p !== "object") throw bad("not an object");
+  if (!PLAN_STATUSES.includes(p.status)) throw bad(`unknown status "${p.status}"`);
+  const m = p.metadata;
+  if (!m || m.mode !== "historical" || m.execution_mode !== "real") throw bad("not labelled as real historical data");
+  if (!p.locations || !p.locations.origin || !p.locations.destination) throw bad("locations missing");
+  if (!p.departure || !Array.isArray(p.departure.options)) throw bad("departure options missing");
+  if (p.status !== "no_route") {
+    const r = p.route, k = p.risk;
+    if (!r || !Array.isArray(r.xy_km) || r.xy_km.length < 2) throw bad("route geometry missing");
+    if (!k || !k.combined || !k.sea_ice || !k.iceberg) throw bad("risk breakdown missing");
+    if (!Array.isArray(p.daily)) throw bad("daily timeline missing");
+  }
+  return p;
+}
+
+/* ---- form */
+function presetById(id) { return (prod.locations?.presets || []).find((p) => p.id === id) || null; }
+
+function snapNote(role, loc) {
+  if (!loc) return null;
+  const who = role === "origin" ? "Origin" : "Destination";
+  if (loc.available === false) return el("p", { class: "pr-note bad" }, `${who}: ${loc.reason}`);
+  if (!loc.snapped) return null;
+  const r = loc.resolved || {};
+  return el("p", { class: "pr-note" }, el("b", {}, `${who} snapped ${num(loc.distance_km, 1)} km`),
+    ` to the nearest open-water grid cell: requested ${ll(loc.requested)}, routing from ${ll(r)}. ${loc.reason || ""}`);
+}
+
+function dateNote() {
+  const d = prod.dates;
+  if (!d) return null;
+  const dates = d.window_dates || [];
+  if (!dates.length) return el("p", { class: "pr-note bad" }, "No supported issue dates for this route.");
+  return el("p", { class: "pr-note muted" }, `Supported issue dates for this route: ${dates.length} days between ` +
+    `${dates[0]} and ${dates[dates.length - 1]} (Nov–Feb seasons; some single days are missing upstream). ` +
+    `Route horizon ${d.horizon_days} days, ${d.window_days_max}-day departure window.`);
+}
+
+function formProblem() {
+  const f = $("#pr-form"), o = f.origin.value, dst = f.destination.value, day = f.issue.value;
+  if (!prod.locations) return "Locations are still loading.";
+  if (!o || !dst) return "Choose an origin and a destination.";
+  if (o === dst) return "Origin and destination are the same place. Choose two different locations.";
+  if (presetById(o)?.available === false || presetById(dst)?.available === false) return "This location cannot be routed.";
+  if (!prod.dates) return "Supported dates are still loading.";
+  if (!day) return "Choose an issue date.";
+  if (!(prod.dates.window_dates || []).includes(day)) {
+    return `No Real Historical Data for ${day} on this route. Pick a date in the supported range below.`;
+  }
+  return null;
+}
+
+function refreshForm() {
+  const f = $("#pr-form"), problem = formProblem();
+  const notes = [snapNote("origin", presetById(f.origin.value)), snapNote("destination", presetById(f.destination.value)),
+    problem && prod.locations ? el("p", { class: "pr-note bad", id: "pr-form-problem" }, problem) : null, dateNote()];
+  $("#pr-notes").replaceChildren(...notes.filter(Boolean));
+  $("#pr-submit").disabled = Boolean(problem) || prod.busy;
+}
+
+async function loadProductDates() {
+  const f = $("#pr-form"), o = f.origin.value, dst = f.destination.value;
+  if (!o || !dst || o === dst) { prod.dates = null; refreshForm(); return; }
+  const key = `${o}|${dst}`;
+  if (prod.datesKey === key && prod.dates) { refreshForm(); return; }
+  prod.datesKey = key;
+  prod.dates = null;
+  $("#pr-issue").disabled = true;
+  refreshForm();
+  try {
+    const d = await planFetch(`/real/historical/dates?origin=${encodeURIComponent(o)}&destination=${encodeURIComponent(dst)}`);
+    if (prod.datesKey !== key) return;          // a newer selection won
+    prod.dates = d;
+    const input = $("#pr-issue"), season = $("#pr-season"), dates = d.window_dates || [];
+    const seasons = (d.seasons && d.seasons.window) || [];
+    season.replaceChildren(...seasons.map((s) => el("option", { value: s.season },
+      `${s.season} (${s.n_dates} dates${s.out_of_sample ? "" : ", in-sample"}` +
+      `${s.independent_evaluation ? ", independent evaluation" : ""})`)));
+    season.disabled = !seasons.length;
+    if (dates.length) {
+      input.min = dates[0]; input.max = dates[dates.length - 1];
+      if (!dates.includes(input.value)) {
+        const pick = seasons.find((s) => s.season === "2023-24") || seasons[seasons.length - 1];
+        input.value = dates.includes("2023-11-14") ? "2023-11-14" : (pick ? pick.first : dates[0]);
+      }
+    }
+    const cur = seasons.find((s) => s.first <= input.value && input.value <= s.last);
+    if (cur) season.value = cur.season;
+    input.disabled = !dates.length;
+  } catch (e) {
+    if (prod.datesKey !== key) return;
+    prod.datesKey = null;
+    $("#pr-notes").replaceChildren(el("p", { class: "pr-note bad" },
+      `Could not load the supported dates: ${e.message}`));
+    $("#pr-submit").disabled = true;
+    return;
+  }
+  refreshForm();
+}
+
+function fillLocationSelects(locs) {
+  const usable = locs.presets;
+  const option = (p) => el("option", p.available === false ? { value: p.id, disabled: "" } : { value: p.id },
+    p.name + (p.snapped ? ` (snaps ${num(p.distance_km, 1)} km)` : "") + (p.available === false ? " (unavailable)" : ""));
+  const byRegion = (sel) => {
+    const groups = new Map();
+    for (const p of usable) {
+      if (!groups.has(p.region)) groups.set(p.region, el("optgroup", { label: p.region || "Other" }));
+      groups.get(p.region).append(option(p));
+    }
+    sel.replaceChildren(...groups.values());
+  };
+  const o = $("#pr-origin"), dst = $("#pr-destination");
+  byRegion(o); byRegion(dst);
+  const ok = usable.filter((p) => p.available !== false);
+  // The API's own order: the configured origin comes first and the configured destination second.
+  if (ok[0]) o.value = ok[0].id;
+  if (ok[1]) dst.value = ok[1].id;
+  o.disabled = dst.disabled = $("#pr-swap").disabled = false;
+}
+
+function showProductUnavailable(reason) {
+  $("#pr-unavailable").hidden = false;
+  $("#pr-unavailable-reason").textContent = reason;
+  $("#pr-landing").hidden = true;
+  for (const id of ["#pr-origin", "#pr-destination", "#pr-season", "#pr-issue", "#pr-submit", "#pr-swap"]) $(id).disabled = true;
+  $("#pr-notes").replaceChildren();
+}
+
+async function setupProduct(status) {
+  const hs = status && status.historical;
+  if (!status) { showProductUnavailable("The API could not be reached, so no route can be planned."); return; }
+  if (!hs || hs.status !== "available") {
+    showProductUnavailable(hs ? `${hs.status}: ${hs.reason || "no reason given"}` : "The server reports no real historical archive.");
+    return;
+  }
+  try {
+    const locs = await planFetch("/real/locations");
+    if (!Array.isArray(locs.presets) || locs.presets.length < 2) throw new Error("fewer than two locations returned");
+    prod.locations = locs;
+    fillLocationSelects(locs);
+  } catch (e) {
+    showProductUnavailable(`Could not load the locations: ${e.message}`);
+    return;
+  }
+  await loadProductDates();
+}
+
+$("#pr-origin").addEventListener("change", loadProductDates);
+$("#pr-destination").addEventListener("change", loadProductDates);
+$("#pr-swap").addEventListener("click", () => {
+  const o = $("#pr-origin"), dst = $("#pr-destination"), a = o.value;
+  o.value = dst.value; dst.value = a;
+  loadProductDates();
+});
+$("#pr-issue").addEventListener("change", () => {
+  const s = ((prod.dates?.seasons?.window) || []).find((x) => x.first <= $("#pr-issue").value && $("#pr-issue").value <= x.last);
+  if (s) $("#pr-season").value = s.season;
+  refreshForm();
+});
+$("#pr-issue").addEventListener("input", refreshForm);
+$("#pr-season").addEventListener("change", () => {
+  const s = ((prod.dates?.seasons?.window) || []).find((x) => x.season === $("#pr-season").value);
+  if (s) { $("#pr-issue").value = s.first; refreshForm(); }
+});
+
+/* ---- views: Plan / Result / Data & Confidence */
+function setView(view) {
+  prod.view = view;
+  document.querySelectorAll(".pr-steps button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.view === view)));
+  const has = Boolean(prod.result);
+  $("#pr-landing").hidden = view !== "plan" || has || prod.busy || !$("#pr-error").hidden || !$("#pr-unavailable").hidden;
+  $("#pr-result").hidden = view !== "result" || !has;
+  $("#pr-data").hidden = view !== "data" || !has;
+  $("#pr-sim").hidden = view !== "sim" || !has;
+  if (view !== "sim") simPause();
+  if (view === "result" && has) drawProduct();
+  if (view === "sim" && has) drawSimMap();
+}
+document.querySelectorAll(".pr-steps button").forEach((b) => b.addEventListener("click", () =>
+  (b.dataset.view === "sim" ? openSimulation() : setView(b.dataset.view))));
+
+/* ---- Plan Route: exactly one POST /real/plan */
+function setBusy(on, body) {
+  prod.busy = on;
+  $("#pr-loading").hidden = !on;
+  for (const id of ["#pr-origin", "#pr-destination", "#pr-season", "#pr-issue", "#pr-swap"]) $(id).disabled = on;
+  $("#pr-submit").textContent = on ? "Planning…" : "Plan Route";
+  clearInterval(prod.timer);
+  if (on) {
+    const o = presetById(body.origin.preset), dst = presetById(body.destination.preset), t0 = Date.now();
+    $("#pr-loading-text").textContent = `${o ? o.name : body.origin.preset} → ${dst ? dst.name : body.destination.preset}, ` +
+      `forecast issued ${body.issue}. The server is building 200 joint sea-ice and iceberg scenarios from real ` +
+      "OSI SAF ice, the U-Net forecast, ERA5/CMEMS forcing and USNIC icebergs, then planning every departure date " +
+      "in the window against the risk budget.";
+    $("#pr-elapsed").textContent = "0";
+    prod.timer = setInterval(() => { $("#pr-elapsed").textContent = String(Math.round((Date.now() - t0) / 1000)); }, 1000);
+  }
+  refreshForm();
+}
+
+function showError(err) {
+  $("#pr-error").hidden = false;
+  $("#pr-error-title").textContent = err.title || "Could not plan this route";
+  $("#pr-error-text").textContent = err.message;
+  $("#pr-error-hint").textContent = err.hint || "";
+}
+
+async function planRoute() {
+  const problem = formProblem();
+  if (problem || prod.busy) { refreshForm(); return; }
+  const f = $("#pr-form");
+  const body = { origin: { preset: f.origin.value }, destination: { preset: f.destination.value }, issue: f.issue.value };
+  prod.lastBody = body;
+  $("#pr-error").hidden = true;
+  // A new plan replaces the old one: never leave a previous result on screen next to new inputs or an error.
+  prod.result = null;
+  resetSimulation();
+  document.querySelectorAll('.pr-steps button[data-view="result"], .pr-steps button[data-view="data"], ' +
+    '.pr-steps button[data-view="sim"]').forEach((b) => { b.disabled = true; });
+  const ctrl = new AbortController();
+  prod.controller = ctrl;
+  let timedOut = false;
+  const kill = setTimeout(() => { timedOut = true; ctrl.abort(); }, PLAN_TIMEOUT_MS);
+  setBusy(true, body);
+  setView("plan");
+  try {
+    const res = checkPlan(await planFetch("/real/plan", { method: "POST", body: JSON.stringify(body), signal: ctrl.signal }));
+    prod.result = res;
+    renderProduct(res);
+    document.querySelectorAll('.pr-steps button[data-view="result"], .pr-steps button[data-view="data"]')
+      .forEach((b) => { b.disabled = false; });
+    $('.pr-steps button[data-view="sim"]').disabled = !res.route;
+    setView("result");
+  } catch (e) {
+    if (e.name === "AbortError") {
+      showError(timedOut ? new PlanError("The plan took too long", `No answer from the server after ` +
+        `${PLAN_TIMEOUT_MS / 1000} s, so the request was stopped.`, "The server may be overloaded. Try again.")
+        : new PlanError("Planning cancelled", "The request was cancelled; no result is shown.", ""));
+    } else showError(e instanceof PlanError ? e : new PlanError("Could not plan this route", e.message));
+    setView("plan");
+  } finally {
+    clearTimeout(kill);
+    prod.controller = null;
+    setBusy(false);
+  }
+}
+
+$("#pr-form").addEventListener("submit", (ev) => { ev.preventDefault(); planRoute(); });
+$("#pr-retry").addEventListener("click", () => planRoute());
+$("#pr-cancel").addEventListener("click", () => { if (prod.controller) prod.controller.abort(); });
+
+/* ---- result */
+function metric(label, value, sub = "") {
+  return el("div", { class: "pr-metric" }, el("span", { class: "pr-metric-label" }, label),
+    el("b", { class: "pr-metric-value" }, value), sub ? el("span", { class: "pr-metric-sub" }, sub) : "");
+}
+
+function budgetBar(upper, budget) {
+  // Scale so the budget sits at 50% of the bar; values beyond twice the budget fill the bar.
+  const w = Math.min(100, (100 * upper) / (2 * budget));
+  return el("div", { class: "pr-budget" },
+    el("div", { class: "pr-budget-fill " + (upper <= budget ? "ok" : "bad"), style: `width:${w.toFixed(1)}%` }),
+    el("div", { class: "pr-budget-mark" }), el("span", { class: "pr-budget-label" }, `budget ${pct(budget, 0)}`));
+}
+
+function riskCard(kind, title, r, risk, extra = []) {
+  const main = kind === "combined", budget = risk.risk_budget;
+  const head = el("div", { class: "pr-risk-head" }, el("h3", {}, title),
+    main ? el("span", { class: "pill " + (r.within_budget ? "ok" : "bad") },
+      r.within_budget ? "✓ within budget" : "✕ exceeds budget") : el("span", { class: "pr-risk-tag" }, "component"));
+  return el("div", { class: "card pr-risk " + kind, "data-risk": kind }, head,
+    el("div", { class: "pr-risk-value" }, pct(r.p_breach_upper, 1)),
+    el("div", { class: "pr-risk-caption" }, `P(breach) ${Math.round(100 * risk.confidence)}% upper bound (Wilson)`),
+    main ? budgetBar(r.p_breach_upper, budget) : "",
+    el("div", { class: "pr-risk-rows" },
+      row("Scenarios breaching", pctOf(r.breaches, r.n_scenarios)),
+      row("Observed share", pct(r.p_breach, 1)), ...extra),
+    el("p", { class: "pr-risk-def" }, (risk.definitions || {})[kind] || ""));
+}
+
+function renderVerdict(p) {
+  const r = p.route, o = p.locations.origin, dst = p.locations.destination, risk = p.risk;
+  const bud = risk ? risk.risk_budget : budget();
+  const card = $("#pr-verdict");
+  card.classList.remove("ok", "bad", "none");
+  $("#pr-route-name").textContent = `${o.name || "Origin"} → ${dst.name || "Destination"} · forecast issued ${p.metadata.issue_date}`;
+  const badge = $("#pr-verdict-badge");
+  if (p.status === "recommended") {
+    card.classList.add("ok");
+    badge.textContent = "✓ Recommended";
+    $("#pr-verdict-title").textContent = `Depart ${fmtDay(r.departure_date)}: within the ${pct(bud, 0)} risk budget`;
+  } else if (p.status === "no_feasible_departure") {
+    card.classList.add("bad");
+    badge.textContent = "✕ Not recommended";
+    $("#pr-verdict-title").textContent =
+      `No departure in the selected window meets the ${pct(bud, 0)} risk budget.`;
+  } else {
+    card.classList.add("none");
+    badge.textContent = "✕ No route";
+    $("#pr-verdict-title").textContent = "No usable route was found for any departure in the window.";
+  }
+  $("#pr-verdict-text").textContent = p.status === "no_feasible_departure" ?
+    `Showing the least-risky option for reference only: depart ${r.departure_date}. ${p.explanation}` : p.explanation;
+  $("#pr-metrics").replaceChildren(...(r ? [
+    metric(p.status === "recommended" ? "Recommended departure" : "Least-risky departure", fmtUtc(r.departure_utc),
+      r.lead_days ? `+${r.lead_days} d after issue` : "on the issue date"),
+    metric("ETA (expected)", fmtUtc(r.eta_utc)),
+    metric("Voyage duration", fmtHours(r.expected_hours), `p10–p90 ${num(r.hours_p10, 1)}–${num(r.hours_p90, 1)} h`),
+    metric("Distance", `${num(r.distance_km)} km`),
+    metric("Fuel index", num(r.fuel_index?.expected), "relative index, not tonnes"),
+  ] : []));
+  $("#pr-metrics").hidden = !r;
+  $("#pr-sim-cta").hidden = !r;
+  $("#pr-sim-cta-note").textContent = p.status === "recommended" ?
+    "Sail this route day by day through the observed sea ice, with a new real forecast and the replanning rules " +
+    "applied each day." : "This route was not recommended. The simulation shows what sailing the least-risky " +
+    "option would have met, day by day, with the replanning rules applied.";
+}
+
+function renderRisks(p) {
+  const risk = p.risk, box = $("#pr-risks");
+  if (!risk) { box.replaceChildren(); box.hidden = true; return; }
+  box.hidden = false;
+  const inc = risk.iceberg_only_increment || {};
+  box.replaceChildren(
+    riskCard("combined", "Combined risk (authoritative)", risk.combined, risk,
+      [row("Estimator", `${risk.estimator} at ${Math.round(100 * risk.confidence)}%`)]),
+    riskCard("sea_ice", "Sea-ice risk", risk.sea_ice, risk),
+    riskCard("iceberg", "Iceberg risk", risk.iceberg, risk, [
+      row("Breaching only because of icebergs", pctOf(inc.breaches ?? 0, inc.n_scenarios ?? risk.combined.n_scenarios)),
+      ...(risk.iceberg.note ? [row("Note", risk.iceberg.note)] : [])]),
+  );
+}
+
+function prPlanForLayer(p, k) {
+  const L = p.layers, g = L.grid, layer = L.layers.find((x) => x.scenario_layer === k) || L.layers[0];
+  const r = p.route, cell = (loc) => {
+    const q = loc.resolved;
+    return q && q.row != null ? [g.x_km[q.col], g.y_km[q.row]] : null;
+  };
+  return {
+    layer,
+    plan: {
+      map: { nx: g.nx, ny: g.ny, res_km: g.res_km, x0_km: g.x0_km, y0_km: g.y0_km, rotation_rad: g.rotation_rad,
+        land: L.land, p_ice: layer.p_ice_ge_limit_pct, p_berg: layer.p_berg_pct },
+      candidates: r ? [{ xy_km: r.xy_km, labels: [p.status === "recommended" ? "recommended route" : "least-risky route (not recommended)"],
+        feasible: p.status === "recommended", p_breach: p.risk.combined.p_breach,
+        p_breach_upper: p.risk.combined.p_breach_upper, expected_hours: r.expected_hours,
+        expected_fuel: r.fuel_index?.expected, distance_km: r.distance_km }] : [],
+      recommended_index: r ? 0 : null,
+      origin_xy_km: cell(p.locations.origin), destination_xy_km: cell(p.locations.destination),
+      land_label: "Land (sea-ice product mask; not a navigational coastline)",
+    },
+  };
+}
+
+function drawProduct() {
+  const p = prod.result;
+  if (!p || $("#tab-product").hidden || $("#pr-result").hidden) return;
+  if (p.layers && p.daily.length) {
+    const day = p.daily[prod.day], { plan, layer } = prPlanForLayer(p, day.scenario_layer);
+    prMapState.plan = plan; prMapState.tracks = p.iceberg_tracks; prMapState.k = day.scenario_layer;
+    drawMap(plan, "#pr-map", prMapState, "#pr-map-legend");
+    drawTrackLines("#pr-map", prMapState, p.iceberg_tracks, day.scenario_layer, "#pr-map-legend");
+    drawDaySegment(p, day);
+    $("#pr-map-title").textContent = `Day ${day.day_of_voyage}: ${fmtDay(day.date)} (${layer.source || "–"} layer)`;
+    $("#pr-ramp-label").textContent = `100% P(ice ≥ ${pct(p.layers.vessel_limit, 0)}) across ${p.metadata.n_scenarios} scenarios`;
+  }
+  if (prWinState.result) drawWindow(prWinState.result, prWinState.budget, "#pr-window-chart", prWinState);
+}
+
+// The selected day's stretch of route, and the nominal end-of-day position, on top of the full route.
+function drawDaySegment(p, day) {
+  if (!day.route_cell_index || !prMapState.toScreen) return;
+  const [a, b] = day.route_cell_index, xy = p.route.xy_km.slice(Math.max(0, a - 1), b + 1);
+  const pts = xy.map(([x, y]) => prMapState.toScreen(x, y));
+  const ctx = $("#pr-map").getContext("2d");
+  ctx.save();
+  ctx.lineJoin = "round"; ctx.lineCap = "round";
+  ctx.strokeStyle = css("--surface-1"); ctx.lineWidth = 9; strokePath(ctx, pts);
+  ctx.strokeStyle = css("--series-2"); ctx.lineWidth = 5; strokePath(ctx, pts);
+  const [x, y] = pts[pts.length - 1];
+  ctx.beginPath(); ctx.arc(x, y, 7, 0, 2 * Math.PI);
+  ctx.fillStyle = css("--series-2"); ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = css("--surface-1"); ctx.stroke();
+  ctx.restore();
+  const legend = $("#pr-map-legend");
+  legend.append(el("span", {}, el("i", { style: `border-top-width:4px;border-color:${css("--series-2")}` }),
+    `Day ${day.day_of_voyage} (nominal)`));
+}
+
+function renderDays(p) {
+  const strip = $("#pr-days");
+  strip.replaceChildren(...p.daily.map((d, i) => {
+    const r = d.risk?.combined?.max_cell_breach_prob;
+    const b = el("button", { type: "button", role: "tab", "aria-selected": String(i === prod.day), "data-day": String(i),
+      class: "pr-day" + (r > 0 ? " warn" : "") },
+      el("b", {}, `Day ${d.day_of_voyage}`), el("span", {}, fmtDay(d.date)), el("span", { class: "pr-day-risk" },
+        `risk ${pct(r, 1)}`));
+    b.addEventListener("click", () => selectDay(i));
+    return b;
+  }));
+  strip.hidden = !p.daily.length;
+}
+
+function selectDay(i) {
+  const p = prod.result;
+  if (!p || !p.daily.length) return;
+  prod.day = Math.max(0, Math.min(p.daily.length - 1, i));
+  document.querySelectorAll("#pr-days .pr-day").forEach((b) => b.setAttribute("aria-selected", String(Number(b.dataset.day) === prod.day)));
+  renderDayTable(p);
+  drawProduct();
+}
+
+$("#pr-days").addEventListener("keydown", (ev) => {
+  if (ev.key === "ArrowRight") { selectDay(prod.day + 1); ev.preventDefault(); }
+  if (ev.key === "ArrowLeft") { selectDay(prod.day - 1); ev.preventDefault(); }
+});
+
+function renderDayTable(p) {
+  const d = p.daily[prod.day];
+  if (!d) {
+    $("#pr-day-title").textContent = "Daily timeline";
+    $("#pr-day-table tbody").replaceChildren(...kv([["Timeline", "No route, so no daily timeline."]]));
+    return;
+  }
+  const pos = d.position_end_of_day, h = d.nominal_hours_since_departure || [];
+  const bergs = (p.iceberg_tracks || []).map((t) => ({ id: t.id, m: (t.daily_mean || []).find((q) => q.layer === d.scenario_layer) }))
+    .filter((t) => t.m && t.m.lat != null);
+  $("#pr-day-title").textContent = `Day ${d.day_of_voyage} of ${p.daily.length}: ${fmtDay(d.date)}`;
+  $("#pr-day-table tbody").replaceChildren(...kv([
+    ["Date", `${d.date} (scenario day ${d.scenario_layer}, ${d.layer_source || "–"} layer)`],
+    ["Hours since departure (nominal)", `${num(h[0], 1)}–${num(h[1], 1)} h`],
+    ["Position at end of day (nominal)", pos ? `${num(pos[0], 3)}°, ${num(pos[1], 3)}°` : "–"],
+    ["Distance this day", `${num(d.distance_km, 1)} km`],
+    ["Sea ice on this stretch", `mean ${pct(d.sea_ice?.mean_concentration, 1)}, max ${pct(d.sea_ice?.max_concentration, 1)} concentration`],
+    ["Max P(ice ≥ vessel limit)", pct(d.sea_ice?.max_p_ge_vessel_limit, 1)],
+    ["Max P(iceberg presence)", pct(d.iceberg?.max_p_presence, 1)],
+    ["Max cell breach probability: combined", pct(d.risk?.combined?.max_cell_breach_prob, 1)],
+    ["… sea ice / icebergs", `${pct(d.risk?.sea_ice?.max_cell_breach_prob, 1)} / ${pct(d.risk?.iceberg?.max_cell_breach_prob, 1)}`],
+    ["Icebergs tracked this day", bergs.length ? bergs.map((t) => `${t.id} (${num(t.m.lat, 2)}°, ${num(t.m.lon, 2)}°)`).join(", ")
+      : "none in the routing grid"],
+  ]));
+}
+
+function renderWindow(p) {
+  const opts = p.departure.options, shown = p.route ? p.route.departure_date : null;
+  const budgetV = p.risk ? p.risk.risk_budget : budget();
+  // The chart's "selected" marker is reserved for a recommendation; a least-risky fallback is marked in the table.
+  prWinState.result = { options: opts, selected: p.status === "recommended" ? shown : null };
+  prWinState.budget = budgetV;
+  const nOk = opts.filter((o) => o.feasible).length;
+  $("#pr-window-verdict").textContent = `${nOk} of ${opts.length} departure dates meet the ${pct(budgetV, 0)} budget. ` +
+    (p.status === "recommended" ? `Recommended: ${shown}. ` : shown ? `None meets it; least-risky shown: ${shown}. ` : "") +
+    `Rule: ${p.departure.rule}.`;
+  const ref = opts.find((o) => o.departure === shown);
+  $("#pr-options tbody").replaceChildren(...opts.map((o) => {
+    const arr = o.expected_hours != null && isFinite(o.expected_hours) ?
+      fmtUtc(new Date(Math.round((Date.parse(o.departure + "T00:00:00Z") + o.expected_hours * 3600e3) / 60e3) * 60e3)
+        .toISOString()) : "–";
+    const dt = ref && o.expected_hours != null && ref.expected_hours != null ? o.expected_hours - ref.expected_hours : null;
+    const isShown = o.departure === shown;
+    return el("tr", { class: isShown ? "rec" : "" },
+      el("td", {}, (isShown ? (p.status === "recommended" ? "★ " : "◆ ") : "") + o.departure),
+      el("td", {}, statusPill(o.feasible)),
+      el("td", { class: "num" }, pct(o.p_breach_upper, 1)),
+      el("td", { class: "num" }, num(o.expected_hours, 1)),
+      el("td", { class: "num" }, isShown ? "shown" : dt == null ? "–" : (dt >= 0 ? "+" : "") + num(dt, 1) + " h"),
+      el("td", {}, arr),
+      el("td", { class: "num" }, num(o.expected_fuel)),
+      el("td", {}, o.support || "–"));
+  }));
+}
+
+function renderData(p) {
+  const m = p.metadata, h = m.provenance || {};
+  for (const id of ["#pr-disclosure", "#pr-data-disclosure"]) $(id).textContent = m.hindsight_disclosure;
+  $("#pr-banners").replaceChildren(...(m.banners || []).map((b) => el("span", { class: "pr-banner" }, b)),
+    el("button", { type: "button", class: "pr-link", id: "pr-open-data" }, "Data & Confidence →"));
+  $("#pr-open-data").addEventListener("click", () => setView("data"));
+  const sea = h.sea_ice || {}, model = h.forecast_model || {}, f = h.forcing || {}, b = h.icebergs || {}, s = h.season;
+  $("#pr-data-modes").replaceChildren(...[
+    ["historical", "Mode", `${m.label}: a past forecast issued ${m.issue_date}, replayed with the real archive; not live.`],
+    ["historical", "Sea ice", `${sea.source || "OSI SAF"} observations up to the issue date.`],
+    ["forecast", "Forecast", `Frozen U-Net ${model.id || ""}, ${m.n_scenarios} joint scenarios.`],
+    ["historical", "Winds & currents", `${f.winds?.product || "ERA5"} and ${f.currents?.product || "CMEMS"}: hindsight forcing.`],
+    ["real", "Icebergs", `${b.source || "USNIC"} list of ${b.list_date || "–"} (${b.age_days ?? "–"} d old), ${(b.drifted || []).length} in the grid, calibrated drift.`],
+    ["schematic", "Use", "Research estimate, not certified navigation."],
+  ].map(([st, k, v]) => el("li", {}, statusBadge(st), el("span", { class: "src-name" }, k), el("span", {}, v))));
+  $("#pr-data-inputs tbody").replaceChildren(...(h.sea_ice ? inputRows(h) : kv([["Inputs", "not reported"]])));
+  const locRows = (role, loc) => [
+    [`${role}: requested`, `${loc.name || loc.id || "–"} at ${ll(loc.requested)}`],
+    [`${role}: used for routing`, `${ll(loc.resolved)} (cell ${(loc.cell || []).join(", ")}), ${loc.snapped ?
+      `snapped ${num(loc.distance_km, 1)} km` : `${num(loc.distance_km, 1)} km from the requested point`}`],
+  ];
+  $("#pr-data-locs tbody").replaceChildren(...kv([
+    ...locRows("Origin", p.locations.origin), ...locRows("Destination", p.locations.destination),
+    ["Route horizon", `${p.horizon?.horizon_days ?? m.horizon_days} days (great circle ${num(p.horizon?.great_circle_km)} km)`],
+    ["Scenario days", `${m.scenario_days} (${m.window_days}-day window + horizon)`],
+    ["Season", s ? `${s.season} · ${s.out_of_sample ? "out-of-sample for the U-Net and drift calibration" :
+      "in-sample: " + (s.in_sample_notes || []).join("; ")}` +
+      `${s.independent_evaluation ? " · independent evaluation season: " + (s.evaluation_notes || []).join("; ") : ""}`
+      : "–"],
+  ]));
+  const defs = (p.risk && p.risk.definitions) || {};
+  $("#pr-data-defs tbody").replaceChildren(...kv([
+    ...Object.entries(defs).map(([k, v]) => [k.replace(/_/g, " "), v]),
+    ["Daily timeline", p.daily_note || "–"],
+    ["Time resolution", p.route?.time_resolution || "–"],
+  ]));
+  $("#pr-data-limits").replaceChildren(...(h.limitations || []).map((t) => el("li", {}, t)));
+  $("#pr-data-disclaimer").textContent = m.disclaimer || "";
+}
+
+function renderProduct(p) {
+  prod.day = 0;
+  renderData(p);
+  renderVerdict(p);
+  renderRisks(p);
+  renderDays(p);
+  renderDayTable(p);
+  renderWindow(p);
+  $("#pr-daily-note").textContent = p.daily_note || "";
+  const mapCard = $("#pr-map").closest(".grid2");
+  mapCard.hidden = !(p.route && p.layers);
+}
+
+/* ------------------------------------------------------------- product: Simulate Voyage */
+// Plays back the frames POST /real/simulate returns for the route just planned. The server sails the route
+// through the observed ice and applies the existing daily replanning; the page only steps through the frames.
+const sim = { data: null, key: null, i: 0, timer: null, busy: false, clock: null };
+const simMapState = { plan: null, toScreen: null, screenRoutes: [] };
+const SIM_STEP_MS = 1400;
+const SIM_TIMEOUT_MS = 600000;
+
+function simKey() {
+  const b = prod.lastBody, r = prod.result && prod.result.route;
+  return b && r ? JSON.stringify([b, r.departure_date]) : null;
+}
+
+function resetSimulation() {
+  simPause();
+  sim.data = null; sim.key = null; sim.i = 0;
+  $("#sim-body").hidden = true; $("#sim-error").hidden = true; $("#sim-loading").hidden = true;
+}
+
+function checkSim(s) {
+  const bad = (why) => new PlanError("The simulation could not be read", `Malformed /real/simulate result: ${why}.`,
+    "No playback is shown and nothing is substituted.");
+  if (!s || typeof s !== "object") throw bad("not an object");
+  if (s.status === "not_simulated") throw new PlanError("This voyage cannot be simulated", s.reason || "No reason given.", "");
+  if (s.status !== "simulated") throw bad(`unknown status "${s.status}"`);
+  const m = s.metadata;
+  if (!m || m.mode !== "historical" || m.execution_mode !== "real") throw bad("not labelled as real historical data");
+  if (!Array.isArray(s.frames) || s.frames.length < 2) throw bad("fewer than two frames");
+  if (s.frames.some((f, k) => f.index !== k || !f.position || !f.route || !Array.isArray(f.track))) throw bad("frames out of order or incomplete");
+  if (!s.summary || !Array.isArray(s.events) || !s.grid) throw bad("summary, events or grid missing");
+  return s;
+}
+
+async function runSimulation() {
+  if (sim.busy || !prod.result || !prod.result.route) return;
+  const body = { ...prod.lastBody, departure: prod.result.route.departure_date };
+  sim.busy = true;
+  $("#sim-error").hidden = true; $("#sim-body").hidden = true; $("#sim-loading").hidden = false;
+  const o = prod.result.locations.origin, d = prod.result.locations.destination;
+  $("#sim-loading-text").textContent = `${o.name} → ${d.name}, departing ${prod.result.route.departure_date}. ` +
+    "For each day at sea the server sails the route through the observed sea ice, issues that day's real forecast " +
+    "(frozen U-Net, ERA5/CMEMS, USNIC icebergs with calibrated drift) and applies the existing replanning rules.";
+  const t0 = Date.now();
+  $("#sim-elapsed").textContent = "0";
+  clearInterval(sim.clock);
+  sim.clock = setInterval(() => { $("#sim-elapsed").textContent = String(Math.round((Date.now() - t0) / 1000)); }, 1000);
+  try {
+    let job = await planFetch("/real/simulate", { method: "POST", body: JSON.stringify(body) });
+    while (job.status === "queued" || job.status === "running") {
+      if (Date.now() - t0 > SIM_TIMEOUT_MS) throw new PlanError("The simulation took too long", "No result after 10 minutes.", "Try again.");
+      await sleep(1500);
+      job = await planFetch(`/jobs/${encodeURIComponent(job.job_id)}`);
+    }
+    if (job.status !== "done") {
+      throw new PlanError("The simulation failed on the server", job.error || "No reason was given.",
+        "Nothing synthetic is shown in its place.");
+    }
+    sim.data = checkSim(job.result);
+    sim.key = simKey();
+    sim.i = 0;
+    renderSimulation();
+  } catch (e) {
+    $("#sim-error").hidden = false;
+    $("#sim-error-title").textContent = e.title || "Could not simulate this voyage";
+    $("#sim-error-text").textContent = e.message + (e.hint ? " " + e.hint : "");
+  } finally {
+    clearInterval(sim.clock);
+    sim.busy = false;
+    $("#sim-loading").hidden = true;
+  }
+}
+
+function openSimulation() {
+  setView("sim");
+  if (sim.data && sim.key === simKey()) { renderSimulation(); return; }
+  if (!sim.busy) runSimulation();
+}
+
+function renderSimulation() {
+  const s = sim.data;
+  $("#sim-body").hidden = false;
+  const m = s.metadata, o = s.locations.origin, d = s.locations.destination;
+  $("#sim-banners").replaceChildren(...(m.banners || []).map((b) => el("span", { class: "pr-banner" }, b)));
+  $("#sim-disclosure").textContent = m.hindsight_disclosure + " This is a replay of a past season, not live vessel tracking.";
+  $("#sim-title").textContent = `${o.name} → ${d.name}`;
+  $("#sim-subtitle").textContent = `Departed ${fmtUtc(s.frames[0].timestamp_utc)} · forecast issued ${m.issue_date} · ` +
+    `${s.frames.length - 1} day(s) at sea · ` + (s.plan.status === "recommended" ? "recommended route" :
+    "least-risky route (not recommended)") + " · " + (s.summary.replans ? `route replanned ${s.summary.replans}×` :
+    "No replan was required during this voyage.");
+  $("#sim-note").textContent = m.simulation_note || "";
+  const slider = $("#sim-slider");
+  slider.max = String(s.frames.length - 1);
+  $("#sim-events").replaceChildren(...s.frames.map((f, k) => {
+    const label = f.phase === "departure" ? "Depart" : f.phase === "arrived" ? "Arrive" : f.phase === "stopped" ? "Stopped"
+      : f.replanned ? "REPLAN" : f.decision && f.decision.action === "no_feasible_route" ? "No feasible route" : "Keep route";
+    const cls = "sim-event" + (f.replanned ? " replan" : "") +
+      (f.decision && f.decision.action === "no_feasible_route" || f.phase === "stopped" ? " alert" : "");
+    const b = el("button", { type: "button", role: "tab", class: cls, "data-frame": String(k), "aria-selected": "false" },
+      el("b", {}, k === 0 ? "Day 0" : `Day ${f.day_of_voyage}`), el("span", {}, fmtDay(f.date)), el("span", { class: "sim-event-label" }, label));
+    b.addEventListener("click", () => { simPause(); showFrame(k); });
+    return b;
+  }));
+  renderSimSummary(s);
+  showFrame(sim.i);
+}
+
+function simRouteLine(ctx, xy, colour, width, dash = []) {
+  if (!xy || xy.length < 2) return;
+  ctx.save(); ctx.lineJoin = "round"; ctx.lineCap = "round";
+  ctx.strokeStyle = colour; ctx.lineWidth = width; ctx.setLineDash(dash);
+  strokePath(ctx, xy.map(([x, y]) => simMapState.toScreen(x, y)));
+  ctx.restore();
+}
+
+function drawSimMap() {
+  const s = sim.data;
+  if (!s || $("#pr-sim").hidden || $("#sim-body").hidden) return;
+  const f = s.frames[sim.i], g = s.grid, first = s.frames[0];
+  const plan = {
+    map: { nx: g.nx, ny: g.ny, res_km: g.res_km, x0_km: g.x0_km, y0_km: g.y0_km, rotation_rad: g.rotation_rad,
+      land: g.land, p_ice: f.map ? f.map.concentration_pct : g.land.map(() => null), p_berg: null },
+    candidates: [], recommended_index: null,
+    origin_xy_km: first.route.xy_km[0], destination_xy_km: first.route.xy_km[first.route.xy_km.length - 1],
+    land_label: "Land (sea-ice product mask)",
+    focus_xy_km: [...first.route.xy_km, ...s.frames.flatMap((x) => x.route.xy_km)],
+  };
+  simMapState.plan = plan;
+  drawMap(plan, "#sim-map", simMapState, "#sim-map-legend");
+  const ctx = $("#sim-map").getContext("2d");
+  const replanned = f.route_version > 0;
+  simRouteLine(ctx, first.route.xy_km, css("--muted"), 2, replanned ? [6, 5] : []);           // as planned
+  if (replanned) simRouteLine(ctx, f.route.xy_km, css("--series-2"), 3);                        // new route ahead
+  else simRouteLine(ctx, f.route.xy_km, css("--series-1"), 3);                                  // route ahead
+  simRouteLine(ctx, f.track, css("--surface-1"), 7);
+  simRouteLine(ctx, f.track, css("--series-3"), 4);                                              // sailed so far
+  ctx.save(); ctx.strokeStyle = css("--berg"); ctx.fillStyle = css("--berg"); ctx.font = "10px system-ui, sans-serif";
+  for (const b of (f.observed && f.observed.icebergs && f.observed.icebergs.in_grid) || []) {
+    const [x, y] = simMapState.toScreen(b.xy_km[0], b.xy_km[1]);
+    ctx.beginPath(); ctx.arc(x, y, 4, 0, 2 * Math.PI); ctx.fill(); ctx.fillText(b.id, x + 6, y + 3);
+  }
+  ctx.restore();
+  const [vx, vy] = simMapState.toScreen(...f.position.xy_km);
+  ctx.save();
+  ctx.beginPath(); ctx.arc(vx, vy, 9, 0, 2 * Math.PI); ctx.fillStyle = css("--series-8"); ctx.fill();
+  ctx.lineWidth = 3; ctx.strokeStyle = css("--surface-1"); ctx.stroke();
+  ctx.fillStyle = css("--text-primary"); ctx.font = "bold 12px system-ui, sans-serif"; ctx.fillText("Vessel", vx + 12, vy + 4);
+  ctx.restore();
+  const key = (colour, text, dashed = false, box = false) => el("span", {}, el("i", box ? { class: "box", style: `background:${colour}` }
+    : { style: `border-color:${colour}${dashed ? ";border-top-style:dashed" : ""}` }), text);
+  $("#sim-map-legend").replaceChildren(
+    key(css("--land"), "Land (sea-ice product mask)", false, true),
+    key(css("--muted"), replanned ? "Original planned route" : "Planned route", replanned),
+    replanned ? key(css("--series-2"), "New route ahead (after replan)") : key(css("--series-1"), "Route ahead"),
+    key(css("--series-3"), "Sailed so far"), key(css("--series-8"), "Vessel", false, true),
+    key(css("--berg"), "USNIC-reported iceberg", false, true));
+  $("#sim-map-title").textContent = `${fmtUtc(f.timestamp_utc)}: ` + (f.map ? `observed sea ice on ${f.map.date}` : "no sea-ice observation for this day");
+}
+
+function frameRisk(f) {
+  return f.forecast && f.forecast.risk ? f.forecast.risk.combined : null;
+}
+
+function showFrame(k) {
+  const s = sim.data;
+  if (!s) return;
+  sim.i = Math.max(0, Math.min(s.frames.length - 1, k));
+  const f = s.frames[sim.i], last = sim.i === s.frames.length - 1;
+  $("#sim-slider").value = String(sim.i);
+  $("#sim-slider-out").textContent = `${f.date} (${sim.i} of ${s.frames.length - 1})`;
+  document.querySelectorAll("#sim-events .sim-event").forEach((b) => b.setAttribute("aria-selected", String(Number(b.dataset.frame) === sim.i)));
+  $("#sim-prev").disabled = sim.i === 0;
+  $("#sim-next").disabled = last;
+  const nReplans = s.frames.slice(0, sim.i + 1).filter((x) => x.replanned).length;
+  const r = frameRisk(f), fc = f.forecast, ahead = fc && fc.route_ahead;
+  const seg = f.observed && f.observed.sea_ice_on_segment, bergs = f.observed && f.observed.icebergs;
+  $("#sim-progress-fill").style.width = `${(100 * f.progress.fraction).toFixed(1)}%`;
+  $("#sim-status-title").textContent = f.phase === "arrived" ? "Voyage status: arrived" : f.phase === "stopped" ?
+    "Voyage status: stopped" : `Voyage status: day ${f.day_of_voyage}`;
+  $("#sim-status").replaceChildren(
+    metric(f.phase === "arrived" ? "Arrived" : "Date and time", fmtUtc(f.timestamp_utc), f.phase === "departure" ? "departure" : ""),
+    metric("Progress", `${Math.round(100 * f.progress.fraction)}%`, `${num(f.progress.sailed_km)} km sailed`),
+    metric("Position", `${num(f.position.lat, 2)}°, ${num(f.position.lon, 2)}°`, "last route cell reached (25 km)"),
+    metric("Route status", nReplans ? `Route replanned (${nReplans}×)` : f.phase === "arrived" ? "Completed" : "On planned route",
+      f.decision ? `today: ${f.decision.action.replace(/_/g, " ")}` : ""),
+    metric("Risk ahead (combined)", r ? pct(r.p_breach_upper, 1) : f.phase === "arrived" ? "–" : "unavailable",
+      r ? `${r.within_budget ? "within" : "exceeds"} the ${pct(fc.risk.risk_budget, 0)} budget · forecast ${fc.issued || m0(s)}` : ""),
+    metric("ETA", fc && fc.eta_utc ? fmtUtc(fc.eta_utc) : f.phase === "arrived" ? fmtUtc(f.timestamp_utc) : "–"),
+    metric("Distance remaining", `${num(f.progress.remaining_km)} km`),
+    metric("Fuel index ahead", ahead && ahead.expected_fuel != null ? num(ahead.expected_fuel) : "–", "relative index"),
+    metric("Sea ice sailed today", seg && seg.max_concentration != null ? `max ${pct(seg.max_concentration, 0)}` : "–",
+      seg && seg.date ? `observed ${seg.date}` : ""),
+    metric("Nearest reported berg", bergs && bergs.nearest_km != null ? `${num(bergs.nearest_km)} km` : "none in grid",
+      bergs ? `${bergs.nearest_id || ""} · USNIC list ${bergs.list_date}` : ""),
+  );
+  renderDecision(f);
+  $("#sim-summary").hidden = !last;
+  $("#sim-play").textContent = sim.timer ? "⏸ Pause" : last ? "↺ Replay" : "▶ Play";
+  $("#sim-play").setAttribute("aria-label", sim.timer ? "Pause" : "Play");
+  drawSimMap();
+}
+const m0 = (s) => s.metadata.issue_date;
+
+function renderDecision(f) {
+  const box = $("#sim-replan");
+  const replanEvent = sim.data.events.find((e) => e.type === "replan" && e.frame === f.index);
+  $("#sim-decision-card").classList.toggle("replan", Boolean(replanEvent));
+  if (f.phase === "departure") {
+    $("#sim-decision-title").textContent = "Departure";
+    $("#sim-decision").textContent = `Sailing the planned route (${sim.data.plan.status === "recommended" ? "recommended" :
+      "least-risky, not recommended"}). Planned risk: ${pct(frameRisk(f)?.p_breach_upper, 1)} upper bound.`;
+  } else if (f.phase === "arrived") {
+    $("#sim-decision-title").textContent = "Arrived";
+    $("#sim-decision").textContent = "Destination reached.";
+  } else if (f.phase === "stopped") {
+    $("#sim-decision-title").textContent = "Simulation stopped";
+    $("#sim-decision").textContent = sim.data.summary.reason || "";
+  } else {
+    $("#sim-decision-title").textContent = replanEvent ? "REPLAN: new route selected" :
+      f.decision.action === "no_feasible_route" ? "No feasible route: human review" : "Today's decision: keep route";
+    $("#sim-decision").textContent = f.decision.explanation;
+  }
+  if (!replanEvent) { box.replaceChildren(); return; }
+  const o = replanEvent.old_route, n = replanEvent.new_route, c = replanEvent.change;
+  const sign = (v, d, u) => (v == null ? "–" : `${v >= 0 ? "+" : ""}${num(v, d)}${u}`);
+  box.replaceChildren(
+    el("p", { class: "sim-reason" }, el("b", {}, "Why: "), (replanEvent.reasons || []).join(" ") || replanEvent.triggers.join(", ")),
+    el("div", { class: "table-wrap" }, el("table", { class: "data sim-compare" },
+      el("thead", {}, el("tr", {}, el("th", {}, ""), el("th", { class: "num" }, "Old route"), el("th", { class: "num" }, "New route"),
+        el("th", { class: "num" }, "Change"))),
+      el("tbody", {},
+        el("tr", {}, el("td", {}, "P(breach) 95% upper"), el("td", { class: "num" }, pct(o.p_breach_upper, 1)),
+          el("td", { class: "num" }, pct(n.p_breach_upper, 1)), el("td", { class: "num" }, c.p_breach_upper == null ? "–" : sign(100 * c.p_breach_upper, 1, " pp"))),
+        el("tr", {}, el("td", {}, "Expected time ahead"), el("td", { class: "num" }, `${num(o.expected_hours, 1)} h`),
+          el("td", { class: "num" }, `${num(n.expected_hours, 1)} h`), el("td", { class: "num" }, sign(c.expected_hours, 1, " h"))),
+        el("tr", {}, el("td", {}, "Distance ahead"), el("td", { class: "num" }, `${num(o.distance_km)} km`),
+          el("td", { class: "num" }, `${num(n.distance_km)} km`), el("td", { class: "num" }, sign(c.distance_km, 0, " km"))),
+        el("tr", {}, el("td", {}, "Fuel index ahead"), el("td", { class: "num" }, num(o.expected_fuel)),
+          el("td", { class: "num" }, num(n.expected_fuel)), el("td", { class: "num" }, sign(c.expected_fuel, 0, ""))),
+      ))),
+    el("p", { class: "sub pr-small" }, `Path moves up to ${num(replanEvent.deviation_km)} km. Forecast issued ${replanEvent.issued}.`));
+}
+
+function renderSimSummary(s) {
+  const u = s.summary, sl = u.sailed || {}, fr = u.final_forecast_risk && u.final_forecast_risk.combined;
+  $("#sim-summary-verdict").textContent = (u.arrived ? `Voyage completed: arrived ${fmtUtc(u.arrival_utc)}. ` :
+    `Voyage not completed: ${u.reason}. `) + (u.replans ? `Route replanned ${u.replans} time(s).` : u.replan_note);
+  $("#sim-summary-metrics").replaceChildren(
+    metric("Status", u.arrived ? "Arrived" : "Incomplete", `${u.days_at_sea} day(s) at sea`),
+    metric("Voyage duration", u.arrived ? fmtHours(u.simulated_hours) : "–",
+      u.arrived ? `${num(u.held_hours, 1)} h held at day boundaries; continuous ${num(sl.hours_through_observed_ice, 1)} h` : ""),
+    metric("Distance sailed", `${num(sl.distance_km)} km`, `planned ${num(u.planned.distance_km)} km`),
+    metric("Fuel index", num(sl.fuel_index), `planned ${num(u.planned.expected_fuel)} · relative index`),
+    metric("Replans", String(u.replans), u.replans ? "" : "No replan was required"),
+    metric("Final route risk", fr ? pct(fr.p_breach_upper, 1) : "unavailable", fr ? `forecast issued ${u.final_forecast_issued}` : ""),
+    metric("Observed ice ≥ limit", `${sl.observed_breach_cells ?? "–"} cells`, `${num(sl.hazard_hours, 1)} h on the sailed track`),
+    metric("Reported-berg footprint", `${sl.berg_footprint_cells ?? "–"} cells`,
+      sl.berg_min_distance_km != null ? `nearest ${sl.berg_nearest} at ${num(sl.berg_min_distance_km)} km` : ""),
+  );
+  $("#sim-summary-events").replaceChildren(...s.events.map((e) => el("li", {},
+    el("div", {}, el("strong", {}, e.type === "replan" ? "REPLAN" : e.type.replace(/_/g, " ")), ` · ${fmtUtc(e.timestamp_utc)}`),
+    el("div", {}, e.explanation || ""))));
+  $("#sim-summary-notes").textContent = Object.values(u.notes || {}).join(" ");
+}
+
+function simPause() {
+  clearInterval(sim.timer); sim.timer = null;
+  if (sim.data) { $("#sim-play").textContent = sim.i === sim.data.frames.length - 1 ? "↺ Replay" : "▶ Play"; $("#sim-play").setAttribute("aria-label", "Play"); }
+}
+
+function simPlay() {
+  if (!sim.data) return;
+  if (sim.timer) { simPause(); return; }
+  if (sim.i >= sim.data.frames.length - 1) showFrame(0);
+  sim.timer = setInterval(() => {
+    if (sim.i >= sim.data.frames.length - 1) { simPause(); return; }
+    showFrame(sim.i + 1);
+    if (sim.i >= sim.data.frames.length - 1) simPause();
+  }, SIM_STEP_MS);
+  $("#sim-play").textContent = "⏸ Pause";
+  $("#sim-play").setAttribute("aria-label", "Pause");
+}
+
+$("#sim-play").addEventListener("click", simPlay);
+$("#sim-prev").addEventListener("click", () => { simPause(); showFrame(sim.i - 1); });
+$("#sim-next").addEventListener("click", () => { simPause(); showFrame(sim.i + 1); });
+$("#sim-slider").addEventListener("input", () => { simPause(); showFrame(Number($("#sim-slider").value)); });
+$("#sim-retry").addEventListener("click", () => runSimulation());
+$("#pr-simulate").addEventListener("click", openSimulation);
+
 /* ------------------------------------------------------------- boot */
 (async () => {
   try {
@@ -964,6 +1881,7 @@ function redrawHist(tab) {
     $("#disclaimer").textContent = "API unavailable: " + e.message;
     showRealUnavailable("API unavailable: " + e.message);
   }
+  const productReady = setupProduct(window.__status || null);
   setModeBadge(currentTab());
   setupHistorical(window.__status ? window.__status.historical : null);
   if (window.__status) {
@@ -974,7 +1892,9 @@ function redrawHist(tab) {
       }
     }
   }
+  await productReady;
   window.addEventListener("resize", () => {
+    if (!$("#tab-product").hidden) { drawProduct(); drawSimMap(); }
     if (mapState.plan && !$("#tab-plan").hidden) drawMap(mapState.plan);
     if (winState.result && !$("#tab-window").hidden) drawWindow(winState.result, budget());
     if (!$("#tab-real").hidden) redrawReal();

@@ -10,14 +10,12 @@ departures        Sweep a departure window and select a date under the risk budg
 from __future__ import annotations
 
 import argparse
-import math
 import sys
 import time
 from datetime import date, timedelta
 from pathlib import Path
 
 import numpy as np
-from pyproj import Geod
 
 from antarctic_routing import DISCLAIMER, __version__
 from antarctic_routing.common.provenance import (
@@ -29,6 +27,7 @@ from antarctic_routing.common.provenance import (
 )
 from antarctic_routing.config import ProjectConfig, load_config, min_scenarios_for_budget
 from antarctic_routing.export import route_to_csv, route_to_geojson
+from antarctic_routing.locations import route_horizon_days
 from antarctic_routing.preprocessing.grid import PolarGrid
 from antarctic_routing.routing.candidates import plan_candidates
 from antarctic_routing.routing.departure import sweep_departures
@@ -41,10 +40,10 @@ SOFTWARE = {"name": "antarctic-routing", "version": __version__}
 
 
 def _horizon_days(cfg: ProjectConfig) -> int:
+    """Horizon of the configured route (the API resolves other routes with :mod:`antarctic_routing.locations`)."""
     o, d = cfg.route.origin, cfg.route.destination
-    km = Geod(ellps="WGS84").inv(o.lon, o.lat, d.lon, d.lat)[2] / 1000.0
-    hours = 1.5 * km / (0.5 * cfg.vessel.cruise_speed_kmh)  # generous: detours + ice slowdown
-    return int(min(cfg.forecast.lead_days, math.ceil(hours / cfg.grid.time_step_hours) + 1))
+    return route_horizon_days(o.lat, o.lon, d.lat, d.lon, cfg.vessel.cruise_speed_kmh, cfg.grid.time_step_hours,
+                              cfg.forecast.lead_days)
 
 
 def _setup(args):

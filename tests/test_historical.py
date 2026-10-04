@@ -183,7 +183,7 @@ def _mini_spec(tmp_path, *, beta=0.1) -> tuple[Path, Path]:
     (root / "spread.json").write_text(json.dumps({"selected_model": {"c": 0.6053, "q": 0.0}}))
     for name, f in files.items():
         spec["inputs"][name] = _rec(root / f, root)
-    for name in ("wind_forcing", "current_forcing", "icebergs"):
+    for name in ("sea_ice_additional", "wind_forcing", "current_forcing", "icebergs"):
         spec["inputs"][name] = []
     path = tmp_path / "spec.json"
     path.write_text(json.dumps(spec))

@@ -61,15 +61,24 @@ def _truth_world(ctx: ForecastContext, day: date, n_days: int) -> ScenarioSet:
     )
 
 
-def _sail(route: Route, ctx: ForecastContext, day: date, vessel: VesselModel, hours: float = 24.0):
-    """Advance ``hours`` along ``route`` through observed ice; return (cells sailed, finished)."""
+def sail_day(route: Route, ctx: ForecastContext, day: date, vessel: VesselModel, hours: float = 24.0):
+    """Advance ``hours`` along ``route`` through observed ice.
+
+    Returns (cells sailed, finished, observed arrival hours of those cells since ``day`` 00:00).
+    """
     ev = evaluate_route(route, _truth_world(ctx, day, 4), vessel)
     arrivals = ev.scenario_arrival_hours[0]
     last = 0
     for i, h in enumerate(arrivals):
         if np.isfinite(h) and h <= hours:
             last = i
-    return route.cells[1: last + 1], last == len(route.cells) - 1
+    return route.cells[1: last + 1], last == len(route.cells) - 1, [float(h) for h in arrivals[1: last + 1]]
+
+
+def _sail(route: Route, ctx: ForecastContext, day: date, vessel: VesselModel, hours: float = 24.0):
+    """Advance ``hours`` along ``route`` through observed ice; return (cells sailed, finished)."""
+    cells, finished, _ = sail_day(route, ctx, day, vessel, hours)
+    return cells, finished
 
 
 def observed_berg_exposure(cells, arrivals, day: date, grid, truth_bergs: Callable[[date], Sequence],

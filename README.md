@@ -120,6 +120,10 @@ The planner's mean predicted P(breach) at departure was 0.3% (95% upper bound 3.
 
 **Product.**
 - **FastAPI backend:** jobs for long runs, voyage replan/history/export, 422/409/400 errors with reasons; `/status`, `/versions`, `/provenance` and read-only `/real/*` endpoints for a verified real-data bundle.
+- **Chosen origin/destination (Real Historical Data):** preset or lat/lon locations snapped to the nearest navigable 25 km cell, with a route-specific forecast horizon; see [docs/LOCATIONS.md](docs/LOCATIONS.md).
+- **One-call plan (`POST /real/plan`, Real Historical Data):** route, recommended departure, ETA, distance, fuel index, sea-ice / iceberg / combined risk and a daily timeline in one response, with hindsight-forcing disclosure; see [docs/PLAN_API.md](docs/PLAN_API.md).
+- **Voyage simulation (`POST /real/simulate`, Real Historical Data):** the planned voyage sailed day by day through the observed sea ice, with a new real forecast and the existing replanning rules each day, as playback frames; see [docs/SIMULATE_API.md](docs/SIMULATE_API.md).
+- **Additional historical season (Real Historical Data):** the separate OSI-430-a v3.0 2024-25 sea-ice file is listed under `sea_ice_additional` in `config/real_historical.json` (with its 2024-25 ERA5, CMEMS and USNIC files) and appended in memory after the frozen file. The frozen file, checkpoint and calibration are unchanged. 2024-25 is labelled an independent evaluation season.
 - **Web dashboard:** no external dependencies, light/dark, phone-width. Verified in Chromium with Playwright: every tab exercised, no console errors.
 - **PDF voyage brief:** [example](docs/voyage_brief_example.pdf).
 - **Docker image:** built and smoke-tested in CI.

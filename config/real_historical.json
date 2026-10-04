@@ -21,6 +21,17 @@
       "path": "processed/sea_ice_25km.nc",
       "sha256": "5d1bc3510736c37a967eb7334e81b7ce1aeaf1c3037d64b2fbae796b04456184"
     },
+    "sea_ice_additional": [
+      {
+        "path": "sea-ice-2024-25/processed/sea_ice_25km_2024_25.nc",
+        "sha256": "a4ea4918830f09f5b7f03c1fdbf4a9dd81a57208a484a229b79341258c72c996",
+        "first": "2024-11-01",
+        "last": "2025-02-28",
+        "season": 2024,
+        "source": "OSI SAF OSI-430-a v3.0 (Interim Sea Ice Concentration Climate Data Record v3) daily sea-ice concentration, 25 km",
+        "provenance": "sea-ice-2024-25/PROVENANCE-sea-ice-2024-25.json"
+      }
+    ],
     "checkpoint": {
       "path": "models/unet_real25_v1/best.pt",
       "sha256": "0bea233a0c20650ab64ddb52165e879db7e26db1de230e2a27dc749e78b97fb9"
@@ -105,6 +116,18 @@
         "sha256": "d8111a55b0387bbaec489196e8af0b9b31d1878732646b7924409b29f0278119",
         "first": "2024-01-01",
         "last": "2024-02-29"
+      },
+      {
+        "path": "iceberg/forcing/processed/confirmation_2024/forcing_era5_daily_25km_20241101_20241231.nc",
+        "sha256": "232a52c5c33757c09f8cb34c8f4516b4770e5d41c9be2fb2d985d0acbec34307",
+        "first": "2024-11-01",
+        "last": "2024-12-31"
+      },
+      {
+        "path": "iceberg/forcing/processed/confirmation_2024/forcing_era5_daily_25km_20250101_20250228.nc",
+        "sha256": "f3b89730766e535d41848827d2f6e31758bf7198a79b4854c32e9d7f1f5484e6",
+        "first": "2025-01-01",
+        "last": "2025-02-28"
       }
     ],
     "current_forcing": [
@@ -143,6 +166,12 @@
         "sha256": "ba0864ae82a30d2e4fbca757dd8db234debc64831dd949370c366337e54929b2",
         "first": "2023-11-01",
         "last": "2024-02-29"
+      },
+      {
+        "path": "iceberg/forcing/processed/confirmation_2024/forcing_cmems_daily_25km_20241101-20250228.nc",
+        "sha256": "05db1a8b87b21e6c17cfbeb65116c8a3d2174df79398b6d278e689331bb98a11",
+        "first": "2024-11-01",
+        "last": "2025-02-28"
       }
     ],
     "icebergs": [
@@ -655,6 +684,91 @@
         "path": "iceberg/raw/archive/AntarcticIcebergs_20240223.csv",
         "sha256": "b31d6483524cc6ff3793b1d87a3bbfbc8b7dc016ef36bdbe2174c3cc22bfd038",
         "date": "2024-02-23"
+      },
+      {
+        "path": "iceberg/raw/archive_2024_25/AntarcticIcebergs_20241107.csv",
+        "sha256": "11a2a97340323cd8a4ca176ab209d0aed9268fdce17f59140c3703e87308c111",
+        "date": "2024-11-07"
+      },
+      {
+        "path": "iceberg/raw/archive_2024_25/AntarcticIcebergs_20241115.csv",
+        "sha256": "1da78435e7e07876d99b2cce2f4e95b40d8f60851dfde1a806a5f6f2e62dc27e",
+        "date": "2024-11-15"
+      },
+      {
+        "path": "iceberg/raw/archive_2024_25/AntarcticIcebergs_20241121.csv",
+        "sha256": "f921ef0e050b52737d81d67ef4a3fb66a36f1839694ded2565c5e66c17be2ffb",
+        "date": "2024-11-21"
+      },
+      {
+        "path": "iceberg/raw/archive_2024_25/AntarcticIcebergs_20241128.csv",
+        "sha256": "0e6494d88b84a935b6c56303d77b93c1039d7defd81ae4004a169d0f599cf980",
+        "date": "2024-11-28"
+      },
+      {
+        "path": "iceberg/raw/archive_2024_25/AntarcticIcebergs_20241206.csv",
+        "sha256": "35c352f04b4f196e22a97aefd8516f02a59d7c0391d3f22e46f0b16842671755",
+        "date": "2024-12-06"
+      },
+      {
+        "path": "iceberg/raw/archive_2024_25/AntarcticIcebergs_20241213.csv",
+        "sha256": "5f54334ede62ad2638c9360758ee3d51e2403e68b56152881f3d4c913abc21f8",
+        "date": "2024-12-13"
+      },
+      {
+        "path": "iceberg/raw/archive_2024_25/AntarcticIcebergs_20241220.csv",
+        "sha256": "d79af8add680dcb7d29af0bdf3c303ab0523e8081be8c8cf5c721871d35a88bb",
+        "date": "2024-12-20"
+      },
+      {
+        "path": "iceberg/raw/archive_2024_25/AntarcticIcebergs_20241226.csv",
+        "sha256": "2b0b12bd1a0c65a7b1f758267975ab3d9e932dae32a53e49e91a6510a36aebb3",
+        "date": "2024-12-26"
+      },
+      {
+        "path": "iceberg/raw/archive_2024_25/AntarcticIcebergs_20250102.csv",
+        "sha256": "a94540ec3811d628bb26c74d42938e44a692ab7d923dcf78c073104643af0c72",
+        "date": "2025-01-02"
+      },
+      {
+        "path": "iceberg/raw/archive_2024_25/AntarcticIcebergs_20250110.csv",
+        "sha256": "fefefaf097e9afe1ed7196adc47fa2cc380872e70cbf2bbfc1e507d971d0f52a",
+        "date": "2025-01-10"
+      },
+      {
+        "path": "iceberg/raw/archive_2024_25/AntarcticIcebergs_20250116.csv",
+        "sha256": "e54369fd4548152f18a686d8addeed9f6cdd76bddfbc4e975a150d721b223651",
+        "date": "2025-01-16"
+      },
+      {
+        "path": "iceberg/raw/archive_2024_25/AntarcticIcebergs_20250123.csv",
+        "sha256": "94425e96d5fd64375c16b017c348897addfe1e616d06d79903ccbf2065a5d80d",
+        "date": "2025-01-23"
+      },
+      {
+        "path": "iceberg/raw/archive_2024_25/AntarcticIcebergs_20250131.csv",
+        "sha256": "397352cfb0325b90f5174ecadb572ae9b996075802a41876358539bed80e8a2d",
+        "date": "2025-01-31"
+      },
+      {
+        "path": "iceberg/raw/archive_2024_25/AntarcticIcebergs_20250206.csv",
+        "sha256": "4124770823673ad5e88a6c3a5a5b971cc1ee82bc5928b086ef566085df0b59ff",
+        "date": "2025-02-06"
+      },
+      {
+        "path": "iceberg/raw/archive_2024_25/AntarcticIcebergs_20250214.csv",
+        "sha256": "96cf2b9ed97494ff8e9c8e9309ed24cea5b0481112779ceb4257aee037017ded",
+        "date": "2025-02-14"
+      },
+      {
+        "path": "iceberg/raw/archive_2024_25/AntarcticIcebergs_20250221.csv",
+        "sha256": "97c3f2dfd88ededa0dd45ab1dbf30d7e18f1766aa9ce187c3b5ec0c980bace1e",
+        "date": "2025-02-21"
+      },
+      {
+        "path": "iceberg/raw/archive_2024_25/AntarcticIcebergs_20250228.csv",
+        "sha256": "cb0735e5357b0c9ac266122db17596bdb9ec50c3f6fd210132399052ba1e23f3",
+        "date": "2025-02-28"
       }
     ]
   },
@@ -686,7 +800,11 @@
         2022,
         2023
       ],
-      "source": "checkpoint metadata (train/validation); test = later seasons of the sea-ice file"
+      "source": "checkpoint metadata (train/validation); test = later seasons of the sea-ice file",
+      "independent_evaluation": [
+        2024
+      ],
+      "independent_evaluation_source": "validation-2024-25/REPORT-validation-2024-25.md (frozen U-Net and calibration scored on 2024-25; nothing fitted)"
     },
     "iceberg_drift": {
       "train": [
@@ -701,7 +819,11 @@
         2022,
         2023
       ],
-      "source": "iceberg/hindcast/calibration/REPORT-drift-calibration.md (gamma and spread factor)"
+      "source": "iceberg/hindcast/calibration/REPORT-drift-calibration.md (gamma and spread factor)",
+      "independent_evaluation": [
+        2024
+      ],
+      "independent_evaluation_source": "iceberg/hindcast/confirmation/REPORT-confirmation-2024-25.md (frozen drift and spread parameters scored on 2024-25; nothing fitted)"
     }
   },
   "hindsight_forcing": "Hindsight forcing: for every day after the issue date, winds (ERA5) and currents (CMEMS reanalysis) are reanalysis fields that were only known afterwards, not forecasts. Iceberg drift and current-aided ship speed are therefore more favourable than a live forecast would allow. Sea ice uses only observations up to the issue date.",

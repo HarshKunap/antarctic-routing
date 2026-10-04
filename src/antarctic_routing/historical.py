@@ -3,7 +3,9 @@
 This wraps the steps ``antroute plan-window`` runs so the API can call them for any issue date that the
 local real-data archive covers:
 
-* sea ice: the OSI SAF 25 km history and the frozen U-Net (``ForecastContext``, residual bank, seed 42);
+* sea ice: the OSI SAF 25 km history and the frozen U-Net (``ForecastContext``, residual bank, seed 42); later
+  seasons listed under ``sea_ice_additional`` (same grid, product and land mask) are appended in memory only,
+  after the frozen file, so the climatology and residual bank (training seasons only) are unchanged;
 * forcing: daily ERA5 winds and CMEMS reanalysis currents, joined from several files by exact date;
 * icebergs: the latest weekly USNIC list on or before the issue date, drifted with the calibrated
   parameters (gamma = 0.1, spread factor c = 0.6053);
@@ -180,6 +182,7 @@ class HistoricalArchive:
     usnic: UsnicArchive
     season_months: list[int]
     history_days: int = 14
+    sea_ice_files: list[dict] = field(default_factory=list)
     _dates: dict[int, list[date]] = field(default_factory=dict, repr=False)
     _days: list[date] = field(default_factory=list, repr=False)
     _index: dict[date, int] = field(default_factory=dict, repr=False)
@@ -197,13 +200,14 @@ class HistoricalArchive:
         inp = spec["inputs"]
         for name in ("sea_ice", "checkpoint", "drift_selection", "spread_calibration"):
             _verify(root, inp[name], name)
-        for name in ("wind_forcing", "current_forcing", "icebergs"):
-            for rec in inp[name]:
+        for name in ("sea_ice_additional", "wind_forcing", "current_forcing", "icebergs"):
+            for rec in inp.get(name, []):
                 _verify(root, rec, name)
         cls._check_parameters(spec, root)
         ds = xr.load_dataset(root / inp["sea_ice"]["path"])
         if ds.attrs.get("execution_mode", "real") != "real":
             raise HistoricalUnavailable(FAILED, "the sea-ice file is not real data")
+        ds, sea_ice_files = cls._join_sea_ice(ds, inp, root)
         shape = ds["land_mask"].shape
         try:
             winds = DailyForcing.load(inp["wind_forcing"], root, "winds", shape)
@@ -213,7 +217,47 @@ class HistoricalArchive:
         land = ds["land_mask"].values.astype(bool)
         currents = DailyForcing(currents.kind, currents.product, currents.times,       # as plan-window does
                                 np.where(land, 0.0, currents.x), np.where(land, 0.0, currents.y), currents.files)
-        return cls(spec, root, ds, winds, currents, UsnicArchive(inp["icebergs"], root), list(season_months))
+        return cls(spec, root, ds, winds, currents, UsnicArchive(inp["icebergs"], root), list(season_months),
+                   sea_ice_files=sea_ice_files)
+
+    @staticmethod
+    def _join_sea_ice(ds: xr.Dataset, inp: dict, root: Path) -> tuple[xr.Dataset, list[dict]]:
+        """Append the ``sea_ice_additional`` seasons after the frozen file, in memory (no file is written).
+
+        Each must be real data on the frozen grid with the frozen land mask and start after the data before it;
+        the frozen file's attributes and land mask are kept, so the model and its training seasons see the
+        same inputs as before."""
+        first = inp["sea_ice"]
+        files = [{"file": Path(first["path"]).name, "sha256": first["sha256"],
+                  "first": str(ds["time"].values[0])[:10], "last": str(ds["time"].values[-1])[:10],
+                  "source": "OSI SAF OSI-450-a / OSI-430-a daily sea-ice concentration, 25 km"}]
+        extra = inp.get("sea_ice_additional", [])
+        if not extra:
+            return ds, files
+        parts = [ds]
+        for rec in extra:
+            new = xr.load_dataset(root / rec["path"])
+            name = Path(rec["path"]).name
+            if new.attrs.get("execution_mode") != "real":
+                raise HistoricalUnavailable(FAILED, f"the sea-ice file {name} is not real data")
+            if not (np.array_equal(new["x"], ds["x"]) and np.array_equal(new["y"], ds["y"])):
+                raise HistoricalUnavailable(FAILED, f"the sea-ice file {name} is not on the frozen grid")
+            if not (new["land_mask"].values == ds["land_mask"].values).all():
+                raise HistoricalUnavailable(FAILED, f"the sea-ice file {name} has a different land mask")
+            if new["time"].values[0] <= parts[-1]["time"].values[-1]:
+                raise HistoricalUnavailable(FAILED, f"the sea-ice file {name} overlaps the data before it")
+            parts.append(new)
+            files.append({"file": name, "sha256": rec["sha256"], "first": str(new["time"].values[0])[:10],
+                          "last": str(new["time"].values[-1])[:10], "source": rec["source"],
+                          "provenance": rec.get("provenance")})
+        joined = xr.concat(parts, dim="time", data_vars="minimal", coords="minimal", compat="override")
+        joined["land_mask"] = ds["land_mask"]
+        joined.attrs = dict(ds.attrs)
+        return joined, files
+
+    def sea_ice_file(self, day: date) -> dict | None:
+        """The sea-ice file holding ``day`` (its provenance as listed in the input spec)."""
+        return next((f for f in self.sea_ice_files if f["first"] <= day.isoformat() <= f["last"]), None)
 
     @staticmethod
     def _check_parameters(spec: dict, root: Path) -> None:
@@ -274,16 +318,19 @@ class HistoricalArchive:
         """Which fitted components used ``season`` (results there are not independent evidence)."""
         roles = {}
         for comp, split in self.spec["splits"].items():
-            roles[comp] = next((name for name in ("train", "validation", "test") if season in split[name]), "not used")
+            roles[comp] = next((name for name in ("train", "validation", "test", "independent_evaluation")
+                                if season in split.get(name, [])), "not used")
         use = {"train": "training", "validation": "validation (model selection)"}
         notes = []
         if roles["forecast_model"] in use:
             notes.append(f"the sea-ice U-Net used this season for {use[roles['forecast_model']]}")
         if roles["iceberg_drift"] in use:
             notes.append(f"the iceberg drift and spread calibration used this season for {use[roles['iceberg_drift']]}")
+        independent = [comp for comp, role in roles.items() if role == "independent_evaluation"]
         return {"season": season_label(season), "start_year": season, "forecast_model": roles["forecast_model"],
                 "iceberg_drift": roles["iceberg_drift"], "out_of_sample": not notes,
-                "in_sample_notes": notes}
+                "in_sample_notes": notes, "independent_evaluation": bool(independent),
+                "evaluation_notes": [_EVAL_NOTES[c] for c in independent]}
 
     def coverage(self, n_days: int) -> list[dict]:
         by: dict[int, list[date]] = {}
@@ -291,6 +338,14 @@ class HistoricalArchive:
             by.setdefault(season_of(d, self.season_months), []).append(d)
         return [{**self.season_info(s), "first": v[0].isoformat(), "last": v[-1].isoformat(), "n_dates": len(v)}
                 for s, v in sorted(by.items())]
+
+
+_EVAL_NOTES = {
+    "forecast_model": "the frozen sea-ice U-Net and its calibration were scored on this season after freezing "
+                      "(nothing fitted)",
+    "iceberg_drift": "the frozen iceberg drift and spread parameters were scored on this season after freezing "
+                     "(nothing fitted)",
+}
 
 
 # --------------------------------------------------------------------------- planner
@@ -359,6 +414,16 @@ class HistoricalPlanner:
         return self.archive.usnic.positions(day, self.archive.params["usnic_max_age_days"])[3]
 
 
+def _sea_ice_provenance(archive: HistoricalArchive, spec: dict, issue: date) -> dict:
+    f = archive.sea_ice_file(issue)
+    if f is None or f is archive.sea_ice_files[0]:                    # the frozen file: unchanged record
+        return {"source": "OSI SAF OSI-450-a / OSI-430-a daily sea-ice concentration, 25 km",
+                "file": Path(spec["inputs"]["sea_ice"]["path"]).name, "sha256": spec["inputs"]["sea_ice"]["sha256"],
+                "observed_through": issue.isoformat()}
+    return {"source": f["source"], "file": f["file"], "sha256": f["sha256"], "observed_through": issue.isoformat(),
+            "provenance": f.get("provenance")}
+
+
 def provenance(archive: HistoricalArchive, cfg: ProjectConfig, issue: date, n_days: int,
                snap: IcebergSnapshot | None, planner: HistoricalPlanner | None = None) -> dict:
     """What a Real Historical Data result was computed from, for the API response."""
@@ -371,9 +436,7 @@ def provenance(archive: HistoricalArchive, cfg: ProjectConfig, issue: date, n_da
         "scenario_days": [issue.isoformat(), (issue + timedelta(days=n_days - 1)).isoformat()],
         "season": archive.season_info(season) if season is not None else None,
         "hindsight_forcing": spec["hindsight_forcing"],
-        "sea_ice": {"source": "OSI SAF OSI-450-a / OSI-430-a daily sea-ice concentration, 25 km",
-                    "file": Path(spec["inputs"]["sea_ice"]["path"]).name, "sha256": spec["inputs"]["sea_ice"]["sha256"],
-                    "observed_through": issue.isoformat()},
+        "sea_ice": _sea_ice_provenance(archive, spec, issue),
         "forecast_model": {"id": Path(ck["path"]).parent.name, "sha256": ck["sha256"],
                            "lead_days": planner.lead_days if planner else None,
                            "train_seasons": spec["splits"]["forecast_model"]["train"]},

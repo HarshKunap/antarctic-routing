@@ -7,6 +7,20 @@ POST /real/historical/departures[?wait=true] departure window from one forecast 
 POST /real/historical/voyages                create a voyage from a real route plan
 POST /real/historical/voyages/{id}/replan    replan from a position on the route with a later forecast
 POST /real/historical/replay[?wait=true]     day-by-day replay with icebergs, scored against observations (job)
+GET  /real/locations                         origin/destination presets, resolved on the routing grid
+POST /real/locations/resolve                 resolve an origin/destination pair: snapped cells, route horizon,
+                                             scenario days and (with an issue date) coverage
+POST /real/plan                              one call: resolved ends, recommended departure and route, ETA,
+                                             distance, fuel index, sea-ice / iceberg / combined risk, daily
+                                             timeline and map layers (see :mod:`antarctic_routing.product`)
+POST /real/simulate[?wait=true]              the voyage /real/plan chose, sailed day by day through the observed
+                                             ice with the existing daily replanning, as playback frames (job; see
+                                             :mod:`antarctic_routing.simulation`)
+
+Routes, departure windows, voyages and replays take an optional ``origin`` and ``destination`` (a preset id
+``{"preset": "palmer_station"}`` or a point ``{"lat": .., "lon": ..}``; both or neither). Points are snapped to
+the nearest navigable 25 km cell (never onto land) and the forecast horizon is computed for that route (see
+:mod:`antarctic_routing.locations`). Without them the configured route is used exactly as before.
 
 The voyage history and export endpoints (``/voyages/{id}/history``, ``/export``) serve these voyages too.
 
@@ -21,6 +35,7 @@ hindsight-forcing disclosure.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import threading
 import uuid
@@ -44,6 +59,17 @@ from antarctic_routing.historical import (
     provenance,
 )
 from antarctic_routing.ingestion.icebergs import in_grid_mask
+from antarctic_routing.locations import MAX_SNAP_KM, LocationError, LocationResolver, RouteSpec, build_route
+from antarctic_routing.product import (
+    BANNERS,
+    TIMELINE_NOTE,
+    chosen_candidate,
+    daily_timeline,
+    environment_layers,
+    json_safe,
+    risk_breakdown,
+    route_summary,
+)
 from antarctic_routing.publish import UNAVAILABLE, grid_geometry, iceberg_tracks, to_percent
 from antarctic_routing.routing.candidates import Candidate, plan_candidates
 from antarctic_routing.routing.departure import plan_from_issue
@@ -56,13 +82,51 @@ DATA_AGE_BASIS = ("Historical mode: a replan uses the sea-ice analysis of its is
                   "(operational product latency is not modelled); the USNIC list age is reported separately.")
 
 
-class HistoricalRouteRequest(BaseModel):
+class LocationIn(BaseModel):
+    """A preset id, or a WGS84 point (optionally named)."""
+
+    preset: str | None = Field(default=None, min_length=1, max_length=40)
+    lat: float | None = Field(default=None, ge=-90, le=90)
+    lon: float | None = Field(default=None, ge=-180, le=180)
+    name: str | None = Field(default=None, max_length=80)
+
+
+class RouteEnds(BaseModel):
+    origin: LocationIn | None = None
+    destination: LocationIn | None = None
+
+
+class HistoricalRouteRequest(RouteEnds):
     issue: date
 
 
-class HistoricalWindowRequest(BaseModel):
+class HistoricalWindowRequest(RouteEnds):
     issue: date
     window_days: int = Field(default=14, ge=1, le=14)
+
+
+class ResolveRequest(BaseModel):
+    origin: LocationIn
+    destination: LocationIn
+    issue: date | None = None
+    window_days: int = Field(default=14, ge=1, le=14)
+
+
+class PlanRequest(BaseModel):
+    origin: LocationIn
+    destination: LocationIn
+    issue: date
+    window_days: int = Field(default=14, ge=1, le=14)
+    include_layers: bool = True
+
+
+class SimulateRequest(BaseModel):
+    """The inputs of a /real/plan request; ``departure`` (optional) must match the plan's chosen departure."""
+    origin: LocationIn
+    destination: LocationIn
+    issue: date
+    window_days: int = Field(default=14, ge=1, le=14)
+    departure: date | None = None
 
 
 class HistoricalReplanRequest(BaseModel):
@@ -71,7 +135,7 @@ class HistoricalReplanRequest(BaseModel):
     issued: date
 
 
-class HistoricalReplayRequest(BaseModel):
+class HistoricalReplayRequest(RouteEnds):
     start: date
     max_wait_days: int = Field(default=7, ge=0, le=21)
 
@@ -86,6 +150,7 @@ class HistoricalService:
                               or svc.config_path.resolve().parent / "real_historical.json")
         self._archive: HistoricalArchive | None = None
         self._planner: HistoricalPlanner | None = None
+        self._resolver: LocationResolver | None = None
         self._error: HistoricalUnavailable | None = None
         self._lock = threading.Lock()
 
@@ -126,6 +191,31 @@ class HistoricalService:
             raise HTTPException(503, {"status": err.status, "reason": err.reason, "label": LABEL})
         return self._planner
 
+    def resolver(self) -> LocationResolver:
+        """Snaps locations on the archive's routing grid and land mask (the cells routes actually use)."""
+        a = self.archive()
+        with self._lock:
+            if self._resolver is None:
+                self._resolver = LocationResolver(grid_of(a.ds), a.ds["land_mask"].values.astype(bool))
+        return self._resolver
+
+    def route(self, origin: LocationIn | None, destination: LocationIn | None) -> RouteSpec:
+        """Resolved ends + route horizon; the configured route when neither end is given (422 when invalid)."""
+        cfg = self.svc.cfg
+        if (origin is None) != (destination is None):
+            raise HTTPException(422, {"status": "invalid_location", "label": LABEL, "reason": "give both origin and "
+                                      "destination, or neither for the configured route"})
+        if origin is None:
+            o, d = cfg.route.origin, cfg.route.destination
+            origin = LocationIn(lat=o.lat, lon=o.lon, name="Configured origin")
+            destination = LocationIn(lat=d.lat, lon=d.lon, name="Configured destination")
+        try:
+            spec = build_route(self.resolver(), _loc(origin), _loc(destination), cfg.vessel.cruise_speed_kmh,
+                               cfg.grid.time_step_hours, cfg.forecast.lead_days)
+        except LocationError as exc:
+            raise HTTPException(422, {"status": "invalid_location", "reason": str(exc), "label": LABEL}) from None
+        return spec
+
     def status(self) -> dict:
         out = {"label": LABEL, "execution_mode": "real", "data_status": DATA_STATUS}
         try:
@@ -139,6 +229,10 @@ class HistoricalService:
                 "coverage": {"route": a.coverage(1 + h), "window": a.coverage(a.params["window_days"] + h)}}
 
 
+def _loc(x: LocationIn) -> dict:
+    return x.model_dump(exclude_none=True)
+
+
 def _labels(a: HistoricalArchive) -> dict:
     return {"execution_mode": "real", "data_status": DATA_STATUS, "data_label": LABEL,
             "hindsight_forcing": a.spec["hindsight_forcing"], "disclaimer": DISCLAIMER}
@@ -148,6 +242,22 @@ def register(app: FastAPI, svc) -> HistoricalService:
     hs = HistoricalService(svc, os.environ.get("ANTROUTE_DATA_ROOT") or None)
     cfg = svc.cfg
     H = svc.horizon_days
+
+    def ends(origin, destination) -> tuple[tuple[int, int], tuple[int, int], int, RouteSpec | None]:
+        """Route cells and horizon: the exact configured path when no ends are given, else the resolved route."""
+        if origin is None and destination is None:
+            return (*svc.endpoints(grid_of(hs.archive().ds)), H, None)
+        spec = hs.route(origin, destination)
+        return (*spec.cells, spec.horizon_days, spec)
+
+    def xy(grid, cell) -> list[float]:
+        return [float(grid.x[cell[1]] / 1000), float(grid.y[cell[0]] / 1000)]
+
+    def with_route(out: dict, grid, o, d, spec: RouteSpec | None) -> dict:
+        out["origin_xy_km"], out["destination_xy_km"] = xy(grid, o), xy(grid, d)
+        if spec is not None:
+            out["route"] = spec.to_dict()
+        return out
 
     def coverage_or_422(issue: date, n_days: int) -> HistoricalArchive:
         a = hs.archive()
@@ -163,11 +273,10 @@ def register(app: FastAPI, svc) -> HistoricalService:
         p = planner.archive.params
         return iceberg_tracks(world, snap.bergs, p["seed"], p["berg_radius_km"] * 1e3, **planner.drift_kwargs())
 
-    def plan_at_issue(issue: date):
+    def plan_at_issue(issue: date, o, d, h: int):
         planner = hs.planner()
         p = planner.archive.params
-        world, snap = planner.world(issue, 1 + H)
-        o, d = svc.endpoints(world.grid)
+        world, snap = planner.world(issue, 1 + h)
         r = cfg.routing
         plan = plan_candidates(world, svc.vessel, o, d, r.risk_budget, r.risk_weights, r.risk_estimator,
                                r.connectivity, p["scenario_routes"], r.confidence, p["seed"])
@@ -186,47 +295,210 @@ def register(app: FastAPI, svc) -> HistoricalService:
         return hs.status()
 
     @app.get("/real/historical/dates")
-    def historical_dates():
+    def historical_dates(origin: str | None = Query(None, max_length=40),
+                         destination: str | None = Query(None, max_length=40)):
         a = hs.archive()
-        n_route, n_window = 1 + H, a.params["window_days"] + H
-        return {**_labels(a), "horizon_days": H, "window_days_max": a.params["window_days"],
-                "route_dates": [d.isoformat() for d in a.available(n_route)],
-                "window_dates": [d.isoformat() for d in a.available(n_window)],
-                "seasons": {"route": a.coverage(n_route), "window": a.coverage(n_window)}}
+        to_loc = lambda pid: None if pid is None else LocationIn(preset=pid)   # noqa: E731
+        _, _, h, spec = ends(to_loc(origin), to_loc(destination))
+        n_route, n_window = 1 + h, a.params["window_days"] + h
+        out = {**_labels(a), "horizon_days": h, "window_days_max": a.params["window_days"],
+               "route_dates": [d.isoformat() for d in a.available(n_route)],
+               "window_dates": [d.isoformat() for d in a.available(n_window)],
+               "seasons": {"route": a.coverage(n_route), "window": a.coverage(n_window)}}
+        if spec is not None:
+            out["route"] = spec.to_dict()
+        return out
+
+    @app.get("/real/locations")
+    def locations():
+        res = hs.resolver()
+        g = res.grid
+        return {**_labels(hs.archive()), "presets": res.presets(), "max_snap_km": MAX_SNAP_KM,
+                "grid": {"crs": "EPSG:3031", "resolution_km": g.resolution_m / 1000.0, "shape": list(g.shape),
+                         "navigable_cells": int(res.navigable.sum())},
+                "snapping": "A location on land, or in ocean cut off from the open sea, moves to the nearest "
+                            f"navigable 25 km cell within {MAX_SNAP_KM:.0f} km; it is never placed on land.",
+                "note": "Presets are research waypoints for decision support, not approved anchorages."}
+
+    @app.post("/real/locations/resolve")
+    def resolve_locations(req: ResolveRequest):
+        spec = hs.route(req.origin, req.destination)
+        a = hs.archive()
+        n_route, n_window = spec.scenario_days(), spec.scenario_days(req.window_days)
+        out = {**_labels(a), **spec.to_dict(), "window_days": req.window_days,
+               "scenario_days": {"route": n_route, "window": n_window}}
+        if req.issue is not None:
+            out["issue"] = req.issue.isoformat()
+            out["coverage"] = {k: {"ok": not (pr := a.problems(req.issue, n)), "problems": pr}
+                               for k, n in (("route", n_route), ("window", n_window))}
+        return out
+
+    # The last few plans' chosen route (small objects), so "Simulate Voyage" after "Plan Route" does not
+    # rebuild the same 14-day window. A miss recomputes it with the same deterministic calls.
+    plan_cache: dict[tuple, dict] = {}
+    plan_cache_lock = threading.Lock()
+
+    def select_plan(planner: HistoricalPlanner, issue: date, window_days: int, o, d, n_days: int):
+        """The departure window from one issue and the route it stands for (what /real/plan shows)."""
+        p, r, vessel = planner.archive.params, cfg.routing, svc.vessel
+        world, snap = planner.world(issue, n_days)
+        sweep = plan_from_issue(world, list(range(window_days)), vessel, o, d, r.risk_budget,
+                                r.risk_weights, r.risk_estimator, r.connectivity, p["scenario_routes"],
+                                r.confidence, p["seed"])
+        option = sweep.selected
+        if option is None:     # show the least risky option, clearly not recommended
+            usable = [x for x in sweep.options if chosen_candidate(x.plan) is not None]
+            option = min(usable, key=lambda x: (x.p_breach_upper, x.departure)) if usable else None
+        cand = chosen_candidate(option.plan) if option is not None else None
+        route = risk = None
+        if cand is not None:
+            step = world.time_step_hours
+            route = route_summary(cand, world, option, step)
+            risk = risk_breakdown(cand.route, world, vessel, option.lead_days * step, r.confidence,
+                                  cand.evaluation, r.risk_budget)
+        with plan_cache_lock:
+            plan_cache[(tuple(o), tuple(d), issue, window_days)] = {
+                "recommended": sweep.selected is not None, "explanation": sweep.explanation,
+                "option": option, "cand": cand, "route": route, "risk": risk}
+            while len(plan_cache) > 16:
+                plan_cache.pop(next(iter(plan_cache)))
+        return world, snap, sweep, option, cand, route, risk
+
+    @app.post("/real/plan")
+    def real_plan(req: PlanRequest):
+        """Locations -> joint real scenarios -> departure window -> route -> risk split -> daily timeline."""
+        spec = hs.route(req.origin, req.destination)
+        o, d, h = *spec.cells, spec.horizon_days
+        n_days = req.window_days + h
+        a = coverage_or_422(req.issue, n_days)
+        with svc.inline_slot():
+            planner = hs.planner()
+            vessel = svc.vessel
+            world, snap, sweep, option, cand, route, risk = select_plan(planner, req.issue, req.window_days, o, d,
+                                                                        n_days)
+            daily, layers = [], None
+            if cand is not None:
+                daily = daily_timeline(cand.route, world, vessel, req.issue, option.lead_days,
+                                       cand.evaluation.expected_hours, risk)
+                if req.include_layers:
+                    layers = {"grid": grid_geometry(world.grid), "land": world.land.astype(np.uint8).ravel().tolist(),
+                              "vessel_limit": vessel.tau,
+                              "layers": environment_layers(world, vessel.tau, [x["scenario_layer"] for x in daily])}
+            berg_tracks = tracks(planner, world, snap)
+        status = ("recommended" if sweep.selected is not None
+                  else "no_feasible_departure" if cand is not None else "no_route")
+        meta = {
+            "mode": "historical", "label": LABEL, "execution_mode": "real", "data_status": DATA_STATUS,
+            "issue_date": req.issue.isoformat(), "hindsight_forcing": True,
+            "hindsight_disclosure": a.spec["hindsight_forcing"], "banners": BANNERS, "disclaimer": DISCLAIMER,
+            "window_days": req.window_days, "horizon_days": h, "scenario_days": n_days,
+            "n_scenarios": world.n_scenarios, "layer_source": world.layer_source,
+            "provenance": provenance(a, cfg, req.issue, n_days, snap, planner),
+        }
+        out = {
+            "status": status, "explanation": sweep.explanation, "metadata": meta,
+            "locations": {"origin": spec.origin.to_dict(), "destination": spec.destination.to_dict()},
+            "horizon": spec.horizon.to_dict(),
+            "route": route, "risk": risk,
+            "departure": {"recommended": sweep.to_dict()["selected"], "rule": sweep.rule,
+                          "explanation": sweep.explanation, "options": [x.to_dict() for x in sweep.options],
+                          "depart_on_issue_date": sweep.options[0].to_dict()},
+            "alternatives": ([svc.candidate_payload(c, world) for c in option.plan.candidates]
+                             if option is not None else []),
+            "daily": daily, "daily_note": TIMELINE_NOTE, "layers": layers,
+            "icebergs": snap.summary(), "iceberg_tracks": berg_tracks,
+        }
+        return json_safe(out)
+
+    @app.post("/real/simulate")
+    def real_simulate(req: SimulateRequest, wait: bool = Query(False)):
+        """Simulate the voyage /real/plan chose, day by day, with the existing daily replanning (job)."""
+        spec = hs.route(req.origin, req.destination)
+        o, d, h = *spec.cells, spec.horizon_days
+        n_days = req.window_days + h
+        a = coverage_or_422(req.issue, n_days)
+
+        def work():
+            from antarctic_routing.simulation import VoyageSimulator
+
+            planner = hs.planner()
+            r, p = cfg.routing, a.params
+            with plan_cache_lock:
+                hit = plan_cache.get((tuple(o), tuple(d), req.issue, req.window_days))
+            if hit is None:
+                select_plan(planner, req.issue, req.window_days, o, d, n_days)
+                with plan_cache_lock:
+                    hit = plan_cache[(tuple(o), tuple(d), req.issue, req.window_days)]
+            option, cand = hit["option"], hit["cand"]
+            base = {**_labels(a), "metadata": {
+                "mode": "historical", "label": LABEL, "execution_mode": "real", "data_status": DATA_STATUS,
+                "issue_date": req.issue.isoformat(), "hindsight_forcing": True,
+                "hindsight_disclosure": a.spec["hindsight_forcing"], "banners": BANNERS, "disclaimer": DISCLAIMER,
+                "window_days": req.window_days, "horizon_days": h, "n_scenarios": p["members"]},
+                "locations": {"origin": spec.origin.to_dict(), "destination": spec.destination.to_dict()}}
+            if cand is None:
+                return {**base, "status": "not_simulated", "reason": "the plan found no route to sail"}
+            if req.departure is not None and req.departure != option.departure:
+                return {**base, "status": "not_simulated",
+                        "reason": f"the plan for these inputs departs {option.departure}, not {req.departure}"}
+            dep = option.departure
+            sea_days = max(1, math.ceil(cand.evaluation.expected_hours / 24)) \
+                if math.isfinite(cand.evaluation.expected_hours) else 1
+            gaps = [f"{dep + timedelta(days=k)}: {'; '.join(pr)}" for k in range(1, sea_days + 1)
+                    if (pr := a.problems(dep + timedelta(days=k), 1 + h))]
+            if gaps:
+                return {**base, "status": "not_simulated",
+                        "reason": "the archive cannot issue the daily forecasts this voyage needs (" +
+                                  " | ".join(gaps) + ")"}
+            policy = ReplanPolicy(r.risk_budget, r.risk_estimator, r.confidence)
+            sim = VoyageSimulator(planner, svc.vessel, policy, r.risk_weights, r.connectivity, p["scenario_routes"],
+                                  p["seed"], h).run(dep, cand.route, cand.evaluation, hit["risk"])
+            grid = grid_of(a.ds)
+            base["metadata"].update(departure_date=dep.isoformat(), simulation_note=sim.pop("note"),
+                                    provenance=provenance(a, cfg, req.issue, n_days, None, planner))
+            return json_safe({
+                **base, "status": "simulated",
+                "plan": {"status": "recommended" if hit["recommended"] else "no_feasible_departure",
+                         "explanation": hit["explanation"], "route": hit["route"],
+                         "risk": {k: hit["risk"][k] for k in ("combined", "sea_ice", "iceberg", "risk_budget")}},
+                "grid": {**grid_geometry(grid), "land": a.ds["land_mask"].values.astype(np.uint8).ravel().tolist(),
+                         "vessel_limit": svc.vessel.tau},
+                **sim})
+
+        return svc.submit("real_simulate", work, wait)
 
     @app.post("/real/historical/routes")
     def historical_routes(req: HistoricalRouteRequest, wait: bool = Query(False)):
-        coverage_or_422(req.issue, 1 + H)
+        o, d, h, spec = ends(req.origin, req.destination)
+        coverage_or_422(req.issue, 1 + h)
 
         def work():
-            planner, world, snap, plan = plan_at_issue(req.issue)
-            return route_payload(planner, world, snap, plan, req.issue, 1 + H)
+            planner, world, snap, plan = plan_at_issue(req.issue, o, d, h)
+            return with_route(route_payload(planner, world, snap, plan, req.issue, 1 + h), world.grid, o, d, spec)
 
         return svc.submit("historical_routes", work, wait)
 
     @app.post("/real/historical/departures")
     def historical_departures(req: HistoricalWindowRequest, wait: bool = Query(False)):
-        n_days = req.window_days + H
+        o, d, h, spec = ends(req.origin, req.destination)
+        n_days = req.window_days + h
         coverage_or_422(req.issue, n_days)
 
         def work():
             planner = hs.planner()
             a, p, r = planner.archive, planner.archive.params, cfg.routing
             world, snap = planner.world(req.issue, n_days)
-            o, d = svc.endpoints(world.grid)
             sweep = plan_from_issue(world, list(range(req.window_days)), svc.vessel, o, d, r.risk_budget,
                                     r.risk_weights, r.risk_estimator, r.connectivity, p["scenario_routes"],
                                     r.confidence, p["seed"])
             sel = sweep.selected
             out = {**sweep.to_dict(), **_labels(a), "issue": req.issue.isoformat(), "window_days": req.window_days,
-                   "horizon_days": H, "risk_budget": r.risk_budget, "n_scenarios": world.n_scenarios,
+                   "horizon_days": h, "risk_budget": r.risk_budget, "n_scenarios": world.n_scenarios,
                    "layer_source": world.layer_source, "land_label": LAND_LABEL, "icebergs": snap.summary(),
                    "iceberg_tracks": tracks(planner, world, snap),
                    "historical": provenance(a, cfg, req.issue, n_days, snap, planner),
                    "selected_route": None, "map": None}
-            g = world.grid
-            out["origin_xy_km"] = [float(g.x[o[1]] / 1000), float(g.y[o[0]] / 1000)]
-            out["destination_xy_km"] = [float(g.x[d[1]] / 1000), float(g.y[d[0]] / 1000)]
+            with_route(out, world.grid, o, d, spec)
             if sel is not None and sel.plan.recommended is not None:
                 mid = sel.lead_days * world.time_step_hours + sel.expected_hours / 2
                 out["selected_route"] = svc.candidate_payload(sel.plan.recommended, world)
@@ -239,12 +511,13 @@ def register(app: FastAPI, svc) -> HistoricalService:
 
     @app.post("/real/historical/voyages", status_code=201)
     def historical_create_voyage(req: HistoricalRouteRequest):
-        coverage_or_422(req.issue, 1 + H)
+        o, d, h, spec = ends(req.origin, req.destination)
+        coverage_or_422(req.issue, 1 + h)
         if len(svc.voyages) >= svc.max_voyages:
             raise HTTPException(503, "voyage store is full (in-memory, ANTROUTE_MAX_VOYAGES); restart to clear it")
         with svc.inline_slot():
-            planner, world, snap, plan = plan_at_issue(req.issue)
-            payload = route_payload(planner, world, snap, plan, req.issue, 1 + H)
+            planner, world, snap, plan = plan_at_issue(req.issue, o, d, h)
+            payload = with_route(route_payload(planner, world, snap, plan, req.issue, 1 + h), world.grid, o, d, spec)
         if plan.recommended is None:
             raise HTTPException(409, plan.explanation)
         from antarctic_routing.api.main import RouteContext
@@ -252,13 +525,15 @@ def register(app: FastAPI, svc) -> HistoricalService:
         vid = uuid.uuid4().hex[:12]
         cand = plan.recommended
         svc.voyages[vid] = {"mode": "historical", "issue": req.issue, "last_issue": req.issue, "candidate": cand,
+                            "horizon_days": h,
                             "world": RouteContext.of(world), "data_labels": _labels(planner.archive), "events": [{
                                 "event": "planned", "at": utc_now(), "departure": req.issue.isoformat(),
                                 "issued": req.issue.isoformat(), "explanation": plan.explanation,
                                 "usnic_list": snap.list_date.isoformat(), **cand.evaluation.summary()}]}
         return {"voyage_id": vid, "route": svc.candidate_payload(cand, world), "explanation": plan.explanation,
                 **{k: payload[k] for k in ("map", "origin_xy_km", "destination_xy_km", "icebergs", "iceberg_tracks",
-                                           "historical", "land_label")}, **_labels(planner.archive)}
+                                           "historical", "land_label", "route") if k in payload},
+                **_labels(planner.archive)}
 
     @app.post("/real/historical/voyages/{vid}/replan")
     def historical_replan(vid: str, req: HistoricalReplanRequest):
@@ -270,11 +545,12 @@ def register(app: FastAPI, svc) -> HistoricalService:
                                      "/voyages/{id}/replan")
         if req.issued < v["last_issue"]:
             raise HTTPException(422, f"issued must not be before the last forecast used ({v['last_issue']})")
-        coverage_or_422(req.issued, 1 + H)
+        h = v.get("horizon_days", H)
+        coverage_or_422(req.issued, 1 + h)
         with svc.inline_slot():
             planner = hs.planner()
             p, r = planner.archive.params, cfg.routing
-            world, snap = planner.world(req.issued, 1 + H)
+            world, snap = planner.world(req.issued, 1 + h)
             try:
                 position = world.grid.cell_of(req.lat, req.lon)
             except ValueError as exc:
@@ -301,16 +577,17 @@ def register(app: FastAPI, svc) -> HistoricalService:
         return {**record, "route": svc.candidate_payload(v["candidate"], world),
                 "map": svc.map_payload(world, svc.vessel.tau, v["candidate"].evaluation.expected_hours),
                 "icebergs": snap.summary(), "iceberg_tracks": tracks(planner, world, snap), "land_label": LAND_LABEL,
-                "historical": provenance(planner.archive, cfg, req.issued, 1 + H, snap, planner),
+                "historical": provenance(planner.archive, cfg, req.issued, 1 + h, snap, planner),
                 **_labels(planner.archive)}
 
     @app.post("/real/historical/replay")
     def historical_replay(req: HistoricalReplayRequest, wait: bool = Query(False)):
         a = hs.archive()
+        o, d, h, spec = ends(req.origin, req.destination)
         window = a.params["window_days"]
-        coverage_or_422(req.start, window + H)
+        coverage_or_422(req.start, window + h)
         ok = 0
-        while ok < req.max_wait_days and not a.problems(req.start + timedelta(days=ok + 1), window + H):
+        while ok < req.max_wait_days and not a.problems(req.start + timedelta(days=ok + 1), window + h):
             ok += 1
         if ok < req.max_wait_days:
             raise HTTPException(422, {"status": "out_of_coverage", "label": LABEL,
@@ -323,14 +600,13 @@ def register(app: FastAPI, svc) -> HistoricalService:
             planner = hs.planner()
             p, r = planner.archive.params, cfg.routing
             grid = grid_of(planner.archive.ds)
-            o, d = svc.endpoints(grid)
             policy = ReplanPolicy(r.risk_budget, r.risk_estimator, r.confidence)
             result = run_replay(planner.ctx, svc.vessel, o, d, req.start, window, req.max_wait_days, p["members"],
-                                policy, r.risk_weights, H, np.random.default_rng(p["seed"]),
+                                policy, r.risk_weights, h, np.random.default_rng(p["seed"]),
                                 connectivity=r.connectivity, scenario_routes=p["scenario_routes"], seed=p["seed"],
                                 hazard=planner.berg_hazard, truth_bergs=planner.observed_bergs,
                                 berg_radius_m=p["berg_radius_km"] * 1e3)
-            return replay_payload(planner, grid, result, req.start, window + H)
+            return with_route(replay_payload(planner, grid, result, req.start, window + h), grid, o, d, spec)
 
         return svc.submit("historical_replay", work, wait)
 
