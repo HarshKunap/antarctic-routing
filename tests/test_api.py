@@ -104,6 +104,9 @@ def test_voyage_lifecycle_replan_history_export(client):
     csv = client.get(f"/voyages/{vid}/export?format=csv")
     assert csv.headers["content-type"].startswith("text/csv")
     assert "planned_arrival_utc" in csv.text.splitlines()[0]
+    # Only Real Historical Data voyages carry a data label; the synthetic export is unchanged.
+    assert csv.text.splitlines()[0] == "waypoint_index,lat,lon,planned_arrival_utc,segment_breach_prob,disclaimer"
+    assert "data_label" not in gj["features"][0]["properties"]
 
 
 def test_replan_position_off_route_is_a_clear_400(client):

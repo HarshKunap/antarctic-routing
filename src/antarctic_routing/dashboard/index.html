@@ -26,6 +26,11 @@
 
   <nav class="tabs" role="tablist">
     <button role="tab" aria-selected="true" data-tab="real">Real-data demo</button>
+    <span class="tab-group">Real Historical Data</span>
+    <button role="tab" aria-selected="false" data-tab="hroute">Route plan</button>
+    <button role="tab" aria-selected="false" data-tab="hwindow">Departure window</button>
+    <button role="tab" aria-selected="false" data-tab="hvoyage">Voyage &amp; replay</button>
+    <span class="tab-group">Synthetic sandbox</span>
     <button role="tab" aria-selected="false" data-tab="plan">Route plan (synthetic)</button>
     <button role="tab" aria-selected="false" data-tab="window">Departure window (synthetic)</button>
     <button role="tab" aria-selected="false" data-tab="voyage">Voyage &amp; replanning (synthetic)</button>
@@ -85,6 +90,176 @@
           <h2>Provenance</h2>
           <div class="table-wrap"><table class="data" id="real-prov"><tbody></tbody></table></div>
           <p><a id="real-prov-link" href="#" target="_blank" rel="noopener">Full provenance (JSON)</a></p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== REAL HISTORICAL DATA: shared notice ===================== -->
+  <template id="hist-note-template">
+    <div class="hist-note">
+      <p><span class="badge status-historical">Real Historical Data</span>
+        <strong>Past seasons, computed on request from real observations.</strong>
+        <span data-field="disclosure"></span></p>
+      <p class="sub">Planner, models and parameters are the frozen ones (200 joint scenarios, seed 42, calibrated
+        iceberg drift). Generic placeholder vessel. Research / decision-support only.</p>
+    </div>
+  </template>
+  <template id="hist-unavailable-template">
+    <div class="card">
+      <h2><span class="badge status-unavailable">Unavailable</span> Real Historical Data is not available</h2>
+      <p class="verdict" data-field="reason"></p>
+      <p class="sub">The backend computes these results from the verified real-data archive
+        (<code>ANTROUTE_DATA_ROOT</code>). Nothing synthetic is shown in its place.</p>
+    </div>
+  </template>
+
+  <!-- ===================== REAL HISTORICAL: ROUTE ===================== -->
+  <section class="tab" id="tab-hroute" hidden>
+    <div class="hist-slot"></div>
+    <div class="hist-body" hidden>
+      <form class="controls" id="hroute-form">
+        <label>Season <select name="season" data-season-pick="route"></select></label>
+        <label>Forecast issued / departure <input type="date" name="issue" required></label>
+        <button type="submit" class="primary" id="hroute-btn">Plan route</button>
+        <span class="status" id="hroute-status" role="status"></span>
+      </form>
+      <p class="season-flag" id="hroute-season"></p>
+      <div class="grid2">
+        <div class="card map-card">
+          <div class="card-head">
+            <h2>Candidate routes over P(ice ≥ vessel limit) <span class="badge status-forecast">Forecast</span></h2>
+            <div class="legend" id="hroute-map-legend"></div>
+          </div>
+          <canvas id="hroute-map" width="760" height="640" aria-label="Real historical route map"></canvas>
+          <div class="tooltip" id="hroute-map-tip" hidden></div>
+          <div class="ramp"><span>0%</span><div class="ramp-bar"></div><span id="hroute-ramp">100% P(ice ≥ limit)</span>
+            <span><i class="box missing-box"></i> no data</span></div>
+        </div>
+        <div class="card">
+          <h2>Recommendation</h2>
+          <p class="verdict" id="hroute-verdict">Choose an issue date and plan a route.</p>
+          <div class="table-wrap"><table class="data" id="hroute-table">
+            <thead><tr><th></th><th>Route</th><th>Status</th><th class="num">km</th><th class="num">E[h]</th>
+              <th class="num">E[fuel]</th><th class="num">P(breach)</th><th class="num">95% UB</th></tr></thead>
+            <tbody></tbody></table></div>
+          <h3>Inputs used</h3>
+          <div class="table-wrap"><table class="data kv" id="hroute-inputs"><tbody></tbody></table></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== REAL HISTORICAL: WINDOW ===================== -->
+  <section class="tab" id="tab-hwindow" hidden>
+    <div class="hist-slot"></div>
+    <div class="hist-body" hidden>
+      <form class="controls" id="hwindow-form">
+        <label>Season <select name="season" data-season-pick="window"></select></label>
+        <label>Forecast issued <input type="date" name="issue" required></label>
+        <label>Window (days) <input type="number" name="window_days" value="14" min="1" max="14"></label>
+        <button type="submit" class="primary" id="hwindow-btn">Plan departure window</button>
+        <span class="status" id="hwindow-status" role="status"></span>
+      </form>
+      <p class="season-flag" id="hwindow-season"></p>
+      <div class="card">
+        <h2>95% upper bound on P(breach) by departure date <span class="badge status-forecast">Forecast</span></h2>
+        <p class="verdict" id="hwindow-verdict">One forecast issue; departures 0 to N days after it.</p>
+        <canvas id="hwindow-chart" width="1100" height="320" aria-label="Real historical departure window chart"></canvas>
+        <div class="tooltip" id="hwindow-tip" hidden></div>
+        <details><summary>Table view</summary>
+          <div class="table-wrap"><table class="data" id="hwindow-table">
+            <thead><tr><th>Departure</th><th class="num">Lead (d)</th><th>Support</th><th>Status</th>
+              <th class="num">95% UB</th><th class="num">E[h]</th><th class="num">E[fuel]</th></tr></thead>
+            <tbody></tbody></table></div>
+        </details>
+      </div>
+      <div class="grid2 spaced">
+        <div class="card map-card">
+          <div class="card-head">
+            <h2 id="hwindow-map-title">Selected departure</h2>
+            <div class="legend" id="hwindow-map-legend"></div>
+          </div>
+          <canvas id="hwindow-map" width="760" height="640" aria-label="Selected departure route map"></canvas>
+          <div class="tooltip" id="hwindow-map-tip" hidden></div>
+          <div class="ramp"><span>0%</span><div class="ramp-bar"></div><span>100% P(ice ≥ limit)</span>
+            <span><i class="box missing-box"></i> no data</span></div>
+        </div>
+        <div class="card">
+          <h2>Inputs used</h2>
+          <div class="table-wrap"><table class="data kv" id="hwindow-inputs"><tbody></tbody></table></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== REAL HISTORICAL: VOYAGE & REPLAY ===================== -->
+  <section class="tab" id="tab-hvoyage" hidden>
+    <div class="hist-slot"></div>
+    <div class="hist-body" hidden>
+      <div class="grid2">
+        <div class="card">
+          <h2>Voyage</h2>
+          <form class="controls stacked" id="hvoyage-form">
+            <label>Season <select name="season" data-season-pick="route"></select></label>
+            <label>Forecast issued / departure <input type="date" name="issue" required></label>
+            <button type="submit" class="primary">Create voyage</button>
+          </form>
+          <form class="controls stacked" id="hreplan-form">
+            <label>Vessel at waypoint <input type="range" name="wp" min="0" max="0" value="0" id="hwp-slider">
+              <output id="hwp-out">–</output></label>
+            <label>New forecast issued <input type="date" name="issued" required></label>
+            <button type="submit" id="hreplan-btn" disabled>Replan from here</button>
+          </form>
+          <p class="status" id="hvoyage-status" role="status"></p>
+          <p class="sub" id="hvoyage-age"></p>
+          <p><a id="hexport-geojson" href="#" hidden>Export GeoJSON</a> · <a id="hexport-csv" href="#" hidden>Export CSV</a></p>
+        </div>
+        <div class="card map-card">
+          <div class="card-head">
+            <h2>Current route</h2>
+            <div class="legend" id="hvoyage-map-legend"></div>
+          </div>
+          <canvas id="hvoyage-map" width="760" height="640" aria-label="Voyage route map"></canvas>
+          <div class="tooltip" id="hvoyage-map-tip" hidden></div>
+          <div class="ramp"><span>0%</span><div class="ramp-bar"></div><span>100% P(ice ≥ limit)</span>
+            <span><i class="box missing-box"></i> no data</span></div>
+        </div>
+      </div>
+      <div class="card spaced">
+        <h2>Decision log (audit)</h2>
+        <ol class="log" id="hvoyage-log"></ol>
+      </div>
+      <div class="card spaced">
+        <h2>Replay a voyage day by day <span class="badge status-historical">Historical</span></h2>
+        <p class="sub">Each day only that day's forecast is used (with the icebergs known that day); the ship then
+          sails 24 h through the <em>observed</em> ice. The sailed track is scored against observations and against a
+          naive plan (leave on the first day along the shortest route).</p>
+        <form class="controls" id="hreplay-form">
+          <label>Season <select name="season" data-season-pick="window"></select></label>
+          <label>First day in port <input type="date" name="start" required></label>
+          <label>Max wait (days) <input type="number" name="max_wait_days" value="7" min="0" max="21"></label>
+          <button type="submit" class="primary" id="hreplay-btn">Run replay</button>
+          <span class="status" id="hreplay-status" role="status"></span>
+        </form>
+        <div class="grid2" id="hreplay-result" hidden>
+          <div class="map-card">
+            <div class="card-head">
+              <h3 id="hreplay-map-title">Observed sea ice on departure</h3>
+              <div class="legend" id="hreplay-map-legend"></div>
+            </div>
+            <canvas id="hreplay-map" width="760" height="640" aria-label="Replay map"></canvas>
+            <div class="ramp"><span>0%</span><div class="ramp-bar"></div><span>100% observed concentration</span>
+              <span><i class="box missing-box"></i> no data</span></div>
+          </div>
+          <div>
+            <p class="verdict" id="hreplay-verdict"></p>
+            <div class="table-wrap"><table class="data" id="hreplay-table">
+              <thead><tr><th>Scored against observations</th><th class="num">Planner</th><th class="num">Naive</th></tr></thead>
+              <tbody></tbody></table></div>
+            <h3>Daily decisions</h3>
+            <ol class="log" id="hreplay-log"></ol>
+          </div>
         </div>
       </div>
     </div>

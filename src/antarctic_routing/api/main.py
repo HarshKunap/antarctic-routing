@@ -16,25 +16,31 @@ POST /voyages                      create a voyage from a route plan
 POST /voyages/{id}/replan          replan from the vessel position
 GET  /voyages/{id}/history         planned route and every replan decision
 GET  /voyages/{id}/export          GeoJSON or CSV of the current route
+GET  /real/historical/...          Real Historical Data: the real-data planner on past seasons
+                                   (see :mod:`antarctic_routing.api.historical`)
 GET  /                             dashboard (static)
 
 Long computations run as background jobs so HTTP requests are never held open
 for a whole ensemble; ``?wait=true`` runs them inline (scripts and tests).
 Responses carry geometry and summaries, never full scientific arrays.
 
-Two data paths, never mixed:
+Three data paths, never mixed:
 
 * the interactive planner (``/routes``, ``/departures``, ``/voyages``) runs on
   the **controlled-synthetic** schematic world and says so in every response;
 * ``/real/*`` serves precomputed results of a real-data run from the bundle in
   ``ANTROUTE_ARTIFACTS_DIR`` (see :mod:`antarctic_routing.publish`), verified by
   checksum at start-up. With no bundle, or a damaged one, these endpoints return
-  503 with the reason; nothing is substituted.
+  503 with the reason; nothing is substituted;
+* ``/real/historical/*`` runs the real-data planner on request for past issue
+  dates from the verified archive in ``ANTROUTE_DATA_ROOT`` ("Real Historical
+  Data", hindsight forcing disclosed). Without it they return 503 with the reason.
 
 Environment: ``ANTROUTE_CONFIG``, ``ANTROUTE_ARTIFACTS_DIR``, ``ANTROUTE_FIGURES``,
 ``ANTROUTE_FIGURES_MODE``, ``ANTROUTE_CORS_ORIGINS`` (comma-separated https origins),
 ``ANTROUTE_MAX_JOBS``, ``ANTROUTE_MAX_VOYAGES``, ``ANTROUTE_MAX_SCENARIO_CELLS``, ``ANTROUTE_MAX_COMPUTE``,
-``ANTROUTE_MAX_BODY_BYTES``, ``ANTROUTE_GIT_COMMIT``. The API reads no data-service credentials.
+``ANTROUTE_MAX_BODY_BYTES``, ``ANTROUTE_GIT_COMMIT``, ``ANTROUTE_DATA_ROOT``, ``ANTROUTE_HISTORICAL_SPEC``.
+The API reads no data-service credentials.
 """
 
 from __future__ import annotations
@@ -64,6 +70,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from antarctic_routing import DISCLAIMER, __version__
+from antarctic_routing.api.historical import register as register_historical
 from antarctic_routing.common.provenance import sha256_file, utc_now
 from antarctic_routing.config import ProjectConfig, load_config, min_scenarios_for_budget
 from antarctic_routing.export import route_to_geojson
@@ -250,6 +257,7 @@ class Service:
         self.cfg = load_config(self.config_path)
         self.config_sha256 = sha256_file(self.config_path)
         self.vessel = VesselModel.from_config(self.cfg)
+        self.horizon_days = _horizon_days(self.cfg)
         self._grids: dict[float, PolarGrid] = {}
         self._grid_lock = threading.Lock()
         self.jobs: dict[str, dict] = {}
@@ -426,6 +434,7 @@ def create_app(config_path: str | Path | None = None, artifacts_dir: str | Path 
     app = FastAPI(title="Antarctic Vessel Routing & Ice-Risk API", version=__version__,
                   description=DISCLAIMER)
     app.state.service = svc
+    hs = register_historical(app, svc)
 
     # innermost, so a 413 still carries the CORS headers and the browser can read it
     app.add_middleware(BodySizeLimit, max_bytes=_env_int("ANTROUTE_MAX_BODY_BYTES", 64 * 1024))
@@ -479,6 +488,7 @@ def create_app(config_path: str | Path | None = None, artifacts_dir: str | Path 
                         limitations=b.index.get("limitations", []))
         return {
             "version": __version__, "time": utc_now(), "disclaimer": DISCLAIMER,
+            "historical": hs.status(),
             "interactive_planner": {"status": SCHEMATIC, "execution_mode": "controlled_synthetic",
                                     "label": SYNTHETIC_LABEL, "endpoints": ["/routes", "/departures", "/voyages"]},
             "real_data": real,
@@ -669,6 +679,9 @@ def create_app(config_path: str | Path | None = None, artifacts_dir: str | Path 
     @app.post("/voyages/{vid}/replan")
     def replan_voyage(vid: str, req: ReplanRequest):
         v = _voyage(vid)
+        if v.get("mode") == "historical":     # never replan a real voyage on a synthetic world
+            raise HTTPException(409, "this voyage uses Real Historical Data; replan it with "
+                                     "/real/historical/voyages/{id}/replan")
         n = svc.check_scenarios(req.scenarios, v["request"].resolution_km)
         with svc.inline_slot():
             world = svc.world(req.issued, n, v["request"].resolution_km, req.seed)
@@ -703,16 +716,21 @@ def create_app(config_path: str | Path | None = None, artifacts_dir: str | Path 
     def export(vid: str, format: str = Query("geojson", pattern="^(geojson|csv)$")):  # noqa: A002
         v = _voyage(vid)
         gj = route_to_geojson(v["candidate"], v["world"], issued=v["world"].start.isoformat() + "Z")
+        labels = v.get("data_labels")  # Real Historical Data voyages carry their label and hindsight disclosure
+        if labels:
+            gj["features"][0]["properties"].update(labels)
         if format == "geojson":
             return gj
         buf = io.StringIO()
         rows = [f["properties"] for f in gj["features"][1:]]
         coords = [f["geometry"]["coordinates"] for f in gj["features"][1:]]
+        extra = ["data_label", "hindsight_forcing"] if labels else []
         w = csv.writer(buf)
-        w.writerow(["waypoint_index", "lat", "lon", "planned_arrival_utc", "segment_breach_prob", "disclaimer"])
+        w.writerow(["waypoint_index", "lat", "lon", "planned_arrival_utc", "segment_breach_prob", "disclaimer",
+                    *extra])
         for p, (lon, lat) in zip(rows, coords, strict=True):
             w.writerow([p["waypoint_index"], lat, lon, p["planned_arrival_utc"], p["segment_breach_prob"],
-                        DISCLAIMER])
+                        DISCLAIMER, *(labels[k] for k in extra)])
         return Response(buf.getvalue(), media_type="text/csv",
                         headers={"Content-Disposition": f"attachment; filename=voyage_{vid}.csv"})
 

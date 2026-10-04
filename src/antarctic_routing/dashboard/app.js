@@ -65,6 +65,10 @@ function setModeBadge(tab) {
     const ok = st.real_data.status === "available";
     status = ok ? "historical" : "unavailable";
     text = ok ? "REAL DATA · HISTORICAL REPLAY" : "REAL DATA UNAVAILABLE";
+  } else if (isHist(tab)) {
+    const ok = st.historical && st.historical.status === "available";
+    status = ok ? "historical" : "unavailable";
+    text = ok ? "REAL HISTORICAL DATA · HINDSIGHT FORCING" : "REAL HISTORICAL DATA UNAVAILABLE";
   } else if (tab === "validation") {
     const real = (window.__figsMode || st.figures.execution_mode) === "real";
     status = real ? "real" : "schematic";
@@ -75,6 +79,8 @@ function setModeBadge(tab) {
 }
 
 /* ------------------------------------------------------------- tabs */
+const HIST_TABS = ["hroute", "hwindow", "hvoyage"];
+const isHist = (tab) => HIST_TABS.includes(tab);
 document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("click", () => {
   document.querySelectorAll(".tabs button").forEach((x) => x.setAttribute("aria-selected", String(x === b)));
   document.querySelectorAll(".tab").forEach((s) => { s.hidden = s.id !== "tab-" + b.dataset.tab; });
@@ -82,6 +88,7 @@ document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("cli
   if (b.dataset.tab === "real") redrawReal();
   if (b.dataset.tab === "plan" && mapState.plan) drawMap(mapState.plan);
   if (b.dataset.tab === "window" && winState.result) drawWindow(winState.result, budget());
+  if (isHist(b.dataset.tab)) redrawHist(b.dataset.tab);
   setModeBadge(b.dataset.tab);
 }));
 const budget = () => (window.__config ? window.__config.routing.risk_budget : 0.05);
@@ -566,6 +573,384 @@ async function loadReal(status) {
   redrawReal();
 }
 
+/* ------------------------------------------------------------- real historical data */
+// The backend runs the frozen real-data planner on past issue dates; the page only draws what comes back.
+const hist = { status: null, dates: null };
+const hRouteState = { plan: null, toScreen: null, screenRoutes: [], tracks: null, k: 0 };
+const hWinState = { result: null, bars: [] };
+const hWinMapState = { plan: null, toScreen: null, screenRoutes: [], tracks: null, k: 0 };
+const hVoyState = { plan: null, toScreen: null, screenRoutes: [], tracks: null, k: 0 };
+const hReplayState = { plan: null, toScreen: null, screenRoutes: [], bergs: null };
+const hvoy = { id: null, latlon: [], lastIssue: null };
+attachMapTip("#hroute-map", "#hroute-map-tip", hRouteState);
+attachMapTip("#hwindow-map", "#hwindow-map-tip", hWinMapState);
+attachMapTip("#hvoyage-map", "#hvoyage-map-tip", hVoyState);
+attachWindowTip("#hwindow-chart", "#hwindow-tip", hWinState);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function errText(e) {
+  try { const d = JSON.parse(e.message); return d.reason || e.message; } catch { return e.message; }
+}
+
+// Background job + polling, so long real-data runs never hold a request open.
+async function runJob(path, body, statusEl, msg) {
+  const first = await api(path, { method: "POST", body: JSON.stringify(body) });
+  let job = first;
+  const t0 = Date.now();
+  while (job.status === "queued" || job.status === "running") {
+    statusEl.textContent = `${msg} (${job.status}, ${Math.round((Date.now() - t0) / 1000)} s)`;
+    await sleep(1500);
+    job = await api(`/jobs/${first.job_id}`);
+  }
+  if (job.status !== "done") throw new Error(job.error || "the computation failed");
+  return job.result;
+}
+
+function setupHistorical(st) {
+  hist.status = st;
+  for (const tab of HIST_TABS) {
+    const sec = $("#tab-" + tab), slot = sec.querySelector(".hist-slot"), body = sec.querySelector(".hist-body");
+    if (!st || st.status !== "available") {
+      const card = $("#hist-unavailable-template").content.cloneNode(true);
+      card.querySelector('[data-field="reason"]').textContent =
+        st ? `${st.status}: ${st.reason || "no reason given"}` : "The data status could not be read.";
+      slot.replaceChildren(card);
+      body.hidden = true;
+      continue;
+    }
+    const note = $("#hist-note-template").content.cloneNode(true);
+    note.querySelector('[data-field="disclosure"]').textContent = st.hindsight_forcing;
+    slot.replaceChildren(note);
+    body.hidden = false;
+  }
+}
+
+function seasonOf(kind, day) {
+  return ((hist.dates && hist.dates.seasons[kind]) || []).find((s) => s.first <= day && day <= s.last) || null;
+}
+
+function seasonText(s) {
+  if (!s) return { text: "", warn: false };
+  if (s.out_of_sample) {
+    return { text: `${s.season} season: out-of-sample for the sea-ice U-Net and the iceberg drift calibration.`,
+      warn: false };
+  }
+  return { text: `${s.season} season is in-sample: ${s.in_sample_notes.join("; ")}. Results here are not ` +
+    "independent evidence of skill.", warn: true };
+}
+
+function showSeasonFlag(sel, s) {
+  const p = $(sel);
+  if (!p) return;
+  const t = seasonText(s);
+  p.textContent = t.text;
+  p.classList.toggle("in-sample", t.warn);
+}
+
+function flagForForm(form, kind) {
+  const day = form.querySelector('input[type="date"]').value;
+  const s = seasonOf(kind, day);
+  const target = form.dataset.flag;
+  if (!target) return;
+  if (!s) {
+    const ranges = hist.dates.seasons[kind].map((x) => `${x.first} to ${x.last}`).join(", ");
+    $(target).textContent = day ? `No Real Historical Data for ${day}. Issue dates run ${ranges} ` +
+      "(some single days inside these ranges are missing upstream)." : "";
+    $(target).classList.add("in-sample");
+  } else showSeasonFlag(target, s);
+}
+
+async function loadHistoricalDates() {
+  const d = await api("/real/historical/dates");
+  hist.dates = d;
+  $("#hroute-form").dataset.flag = "#hroute-season";
+  $("#hwindow-form").dataset.flag = "#hwindow-season";
+  document.querySelectorAll("[data-season-pick]").forEach((sel) => {
+    const kind = sel.dataset.seasonPick, seasons = d.seasons[kind], form = sel.form;
+    const input = form.querySelector('input[type="date"]');
+    const dates = kind === "route" ? d.route_dates : d.window_dates;
+    sel.replaceChildren(...seasons.map((s) => el("option", { value: s.first },
+      `${s.season} · ${s.out_of_sample ? "out-of-sample" : "in-sample"} · ${s.n_dates} dates`)));
+    input.min = dates[0];
+    input.max = dates[dates.length - 1];
+    const pick = seasons.find((s) => s.season === "2023-24") || seasons[seasons.length - 1];
+    sel.value = pick.first;
+    input.value = pick.first;
+    sel.addEventListener("change", () => { input.value = sel.value; flagForForm(form, kind); });
+    input.addEventListener("change", () => flagForForm(form, kind));
+    flagForForm(form, kind);
+  });
+}
+
+// Ensemble-mean iceberg drift up to layer k (forecast); a ring marks the position on that layer.
+function drawTrackLines(canvasSel, st, tracks, k, legendSel) {
+  if (!tracks || !tracks.length || !st.toScreen) return;
+  const ctx = $(canvasSel).getContext("2d"), col = css("--berg");
+  ctx.save();
+  ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 1.5;
+  for (const t of tracks) {
+    const pts = t.daily_mean.filter((d) => d.layer <= k && d.x_km != null).map((d) => st.toScreen(d.x_km, d.y_km));
+    if (!pts.length) continue;
+    ctx.setLineDash([4, 3]); strokePath(ctx, pts); ctx.setLineDash([]);
+    const [x, y] = pts[pts.length - 1];
+    ctx.beginPath(); ctx.arc(x, y, 4, 0, 2 * Math.PI); ctx.stroke();
+    ctx.font = "10px system-ui, sans-serif"; ctx.fillText(t.id, x + 6, y + 3);
+  }
+  ctx.restore();
+  const legend = $(legendSel);
+  legend.append(el("span", {}, el("i", { style: `border-top-style:dashed;border-color:${col}` }),
+    "Iceberg mean drift (forecast)"));
+}
+
+function drawHistMap(canvasSel, st, legendSel) {
+  if (!st.plan) return;
+  drawMap(st.plan, canvasSel, st, legendSel);
+  drawTrackLines(canvasSel, st, st.tracks, st.k, legendSel);
+}
+
+function candRows(plan) {
+  return plan.candidates.map((c, i) => el("tr", { class: i === plan.recommended_index ? "rec" : "" },
+    el("td", {}, el("span", { class: "swatch", style: `background:${css(SERIES[i % SERIES.length])}` })),
+    el("td", {}, (i === plan.recommended_index ? "★ " : "") + c.labels.join(", ")),
+    el("td", {}, statusPill(c.feasible)),
+    el("td", { class: "num" }, num(c.distance_km)), el("td", { class: "num" }, num(c.expected_hours, 1)),
+    el("td", { class: "num" }, num(c.expected_fuel)), el("td", { class: "num" }, pct(c.p_breach)),
+    el("td", { class: "num" }, pct(c.p_breach_upper))));
+}
+
+function inputRows(h) {
+  const files = (f) => (f.files || []).map((x) => x.file).join(", ");
+  const b = h.icebergs, p = h.parameters, s = h.season;
+  return kv([
+    ["Forecast issued", `${h.issue} (sea ice observed up to this day; scenario days ${h.scenario_days.join(" to ")})`],
+    ["Season", s ? `${s.season} · ${s.out_of_sample ? "out-of-sample" : "in-sample: " + s.in_sample_notes.join("; ")}` : "–"],
+    ["Sea ice", `${h.sea_ice.source} · ${h.sea_ice.file} (${short(h.sea_ice.sha256)})`],
+    ["Forecast model", `${h.forecast_model.id} (${short(h.forecast_model.sha256)}), ${h.forecast_model.lead_days ?? "–"}-day leads`],
+    ["Winds (hindsight)", `${h.forcing.winds.product}: ${files(h.forcing.winds)}`],
+    ["Currents (hindsight)", `${h.forcing.currents.product}: ${files(h.forcing.currents)}`],
+    ["Icebergs", b ? `USNIC list of ${b.list_date} (${b.age_days} d old): ${b.drifted.length} drifted` +
+      `${b.drifted.length ? " (" + b.drifted.join(", ") + ")" : ""}; ${b.outside_grid.length} outside the grid` : "–"],
+    ["Iceberg drift", `beta ${p.drift_beta}, alpha scale ${p.drift_alpha_scale}, spread factor ` +
+      `${p.drift_spread_factor}, radius ${p.berg_radius_km} km`],
+    ["Scenarios", `${p.members} joint scenarios, seed ${p.seed}`],
+    ["Probability calibration", h.probability_calibration.applied_in_route_risk ? "applied" : "not applied to route risk"],
+    ["Vessel", `${h.vessel.name}, ice class ${h.vessel.ice_class}, limit ${pct(h.vessel.max_ice_concentration, 0)} (${h.vessel.note})`],
+  ]);
+}
+
+$("#hroute-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const issue = new FormData(ev.target).get("issue");
+  const status = $("#hroute-status");
+  $("#hroute-btn").disabled = true;
+  try {
+    const res = await runJob("/real/historical/routes", { issue }, status,
+      "Running the real-data planner (the first run also loads the model)");
+    hRouteState.plan = res;
+    hRouteState.tracks = res.iceberg_tracks;
+    hRouteState.k = res.map.layer_day;
+    drawHistMap("#hroute-map", hRouteState, "#hroute-map-legend");
+    $("#hroute-verdict").textContent = res.explanation;
+    $("#hroute-table tbody").replaceChildren(...candRows(res));
+    $("#hroute-inputs tbody").replaceChildren(...inputRows(res.historical));
+    $("#hroute-ramp").textContent = `100% P(ice ≥ limit), day ${res.map.layer_day} after issue`;
+    showSeasonFlag("#hroute-season", res.historical.season);
+    status.textContent = `${res.n_scenarios} joint scenarios · ${res.data_label}`;
+  } catch (e) {
+    status.textContent = "Error: " + errText(e);
+  } finally {
+    $("#hroute-btn").disabled = false;
+  }
+});
+
+$("#hwindow-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const f = new FormData(ev.target);
+  const status = $("#hwindow-status");
+  $("#hwindow-btn").disabled = true;
+  try {
+    const res = await runJob("/real/historical/departures",
+      { issue: f.get("issue"), window_days: Number(f.get("window_days")) }, status,
+      "Planning every departure date from one real forecast");
+    hWinState.result = res;
+    drawWindow(res, res.risk_budget, "#hwindow-chart", hWinState);
+    $("#hwindow-verdict").textContent = `${res.explanation} Rule: ${res.rule}.`;
+    $("#hwindow-table tbody").replaceChildren(...res.options.map((o) => el("tr", {},
+      el("td", {}, o.departure), el("td", { class: "num" }, o.lead_days ?? "–"), el("td", {}, o.support || "–"),
+      el("td", {}, statusPill(o.feasible)), el("td", { class: "num" }, pct(o.p_breach_upper)),
+      el("td", { class: "num" }, num(o.expected_hours, 1)), el("td", { class: "num" }, num(o.expected_fuel)))));
+    const sel = res.selected_route;
+    hWinMapState.plan = { map: res.map, candidates: sel ? [sel] : [], recommended_index: sel ? 0 : null,
+      origin_xy_km: res.origin_xy_km, destination_xy_km: res.destination_xy_km, land_label: res.land_label };
+    hWinMapState.tracks = res.iceberg_tracks;
+    hWinMapState.k = res.map.layer_day;
+    drawHistMap("#hwindow-map", hWinMapState, "#hwindow-map-legend");
+    $("#hwindow-map-title").textContent = res.selected ?
+      `Selected departure ${res.selected} (map: day ${res.map.layer_day} after issue)` : "No departure meets the budget";
+    $("#hwindow-inputs tbody").replaceChildren(...inputRows(res.historical));
+    showSeasonFlag("#hwindow-season", res.historical.season);
+    status.textContent = `${res.n_scenarios} joint scenarios · ${res.data_label}`;
+  } catch (e) {
+    status.textContent = "Error: " + errText(e);
+  } finally {
+    $("#hwindow-btn").disabled = false;
+  }
+});
+
+/* voyage */
+function setHRoute(route) {
+  hvoy.latlon = route.latlon;
+  const slider = $("#hwp-slider");
+  slider.max = String(route.latlon.length - 2);
+  slider.value = String(Math.min(Number(slider.value), route.latlon.length - 2));
+  updateHWp();
+}
+function updateHWp() {
+  const k = Number($("#hwp-slider").value), p = hvoy.latlon[k];
+  $("#hwp-out").textContent = p ? `#${k} (${p[0].toFixed(2)}, ${p[1].toFixed(2)})` : "–";
+}
+$("#hwp-slider").addEventListener("input", updateHWp);
+
+function showVoyageMap(res, route) {
+  hVoyState.plan = { map: res.map, candidates: [route], recommended_index: 0, origin_xy_km: route.xy_km[0],
+    destination_xy_km: route.xy_km[route.xy_km.length - 1], land_label: res.land_label };
+  hVoyState.tracks = res.iceberg_tracks;
+  hVoyState.k = res.map.layer_day;
+  if (!$("#tab-hvoyage").hidden) drawHistMap("#hvoyage-map", hVoyState, "#hvoyage-map-legend");
+}
+
+function renderLog(sel, events) {
+  $(sel).replaceChildren(...events.map((e) => el("li", {},
+    el("div", {}, el("strong", {}, e.event === "planned" ? "Planned" : (e.action || e.event || "").toUpperCase()),
+      e.alert ? " ⚠ alert" : "", e.triggers && e.triggers.length ? " · " + e.triggers.join(", ") : ""),
+    el("div", {}, e.explanation || ""),
+    el("div", { class: "meta" }, [e.logged_at || e.at || e.day || "", e.issued ? "forecast " + e.issued : "",
+      e.usnic_list ? "USNIC list " + e.usnic_list : ""].filter(Boolean).join(" · ")))));
+}
+
+$("#hvoyage-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const issue = new FormData(ev.target).get("issue");
+  const status = $("#hvoyage-status");
+  status.textContent = "Planning the voyage with the real-data planner…";
+  try {
+    const v = await api("/real/historical/voyages", { method: "POST", body: JSON.stringify({ issue }) });
+    hvoy.id = v.voyage_id;
+    hvoy.lastIssue = issue;
+    setHRoute(v.route);
+    showVoyageMap(v, v.route);
+    const input = $("#hreplan-form").querySelector('input[name="issued"]');
+    input.min = issue;
+    input.max = hist.dates.route_dates[hist.dates.route_dates.length - 1];
+    const next = new Date(issue + "T00:00:00Z");
+    next.setUTCDate(next.getUTCDate() + 1);
+    input.value = next.toISOString().slice(0, 10);
+    $("#hreplan-btn").disabled = false;
+    for (const [id, fmt] of [["#hexport-geojson", "geojson"], ["#hexport-csv", "csv"]]) {
+      const a = $(id); a.href = apiUrl(`/voyages/${hvoy.id}/export?format=${fmt}`); a.hidden = false;
+    }
+    const s = seasonText(v.historical.season);
+    status.textContent = `Voyage ${hvoy.id} · ${v.explanation}`;
+    $("#hvoyage-age").textContent = `Icebergs: USNIC list of ${v.icebergs.list_date} (${v.icebergs.age_days} d old). ${s.text}`;
+    renderLog("#hvoyage-log", (await api(`/voyages/${hvoy.id}/history`)).events);
+  } catch (e) { status.textContent = "Error: " + errText(e); }
+});
+
+$("#hreplan-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const issued = new FormData(ev.target).get("issued");
+  const p = hvoy.latlon[Number($("#hwp-slider").value)];
+  const status = $("#hvoyage-status");
+  status.textContent = "Replanning with the forecast issued " + issued + "…";
+  $("#hreplan-btn").disabled = true;
+  try {
+    const d = await api(`/real/historical/voyages/${hvoy.id}/replan`, { method: "POST",
+      body: JSON.stringify({ lat: p[0], lon: p[1], issued }) });
+    hvoy.lastIssue = issued;
+    $("#hreplan-form").querySelector('input[name="issued"]').min = issued;
+    setHRoute(d.route);
+    $("#hwp-slider").value = "0"; updateHWp();
+    showVoyageMap(d, d.route);
+    status.textContent = d.explanation;
+    $("#hvoyage-age").textContent = `${d.data_age_basis} USNIC list of ${d.usnic_list} (${d.usnic_age_days} d old).`;
+    renderLog("#hvoyage-log", (await api(`/voyages/${hvoy.id}/history`)).events);
+  } catch (e) { status.textContent = "Error: " + errText(e); }
+  finally { $("#hreplan-btn").disabled = false; }
+});
+
+/* replay */
+function drawReplay() {
+  const st = hReplayState;
+  if (!st.plan) return;
+  drawMap(st.plan, "#hreplay-map", st, "#hreplay-map-legend");
+  const ctx = $("#hreplay-map").getContext("2d"), col = css("--berg");
+  ctx.save(); ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 1.5;
+  for (const b of st.bergs || []) {
+    const [x, y] = st.toScreen(b.xy_km[0], b.xy_km[1]);
+    ctx.beginPath(); ctx.arc(x, y, 4, 0, 2 * Math.PI); ctx.stroke();
+    ctx.font = "10px system-ui, sans-serif"; ctx.fillText(b.id, x + 6, y + 3);
+  }
+  ctx.restore();
+  $("#hreplay-map-legend").replaceChildren(
+    el("span", {}, el("i", { class: "box", style: `background:${css("--land")}` }), st.plan.land_label),
+    el("span", {}, el("i", { style: `border-color:${css(SERIES[0])}` }), "Sailed (planner)"),
+    el("span", {}, el("i", { style: `border-color:${css(SERIES[1])}` }), "Naive (shortest, left on day 1)"),
+    el("span", {}, el("i", { class: "box", style: `background:${css("--berg")}` }), "USNIC-reported berg"));
+}
+
+$("#hreplay-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const f = new FormData(ev.target);
+  const status = $("#hreplay-status");
+  $("#hreplay-btn").disabled = true;
+  try {
+    const res = await runJob("/real/historical/replay",
+      { start: f.get("start"), max_wait_days: Number(f.get("max_wait_days")) }, status,
+      "Replaying day by day (each day in port plans a 14-day window)");
+    $("#hreplay-result").hidden = false;
+    const cands = [];
+    if (res.sailed_xy_km) cands.push({ xy_km: res.sailed_xy_km, labels: ["sailed (planner)"], feasible: true });
+    if (res.naive_xy_km) cands.push({ xy_km: res.naive_xy_km, labels: ["naive"], feasible: true });
+    hReplayState.plan = { map: res.map, candidates: cands, recommended_index: cands.length ? 0 : null,
+      origin_xy_km: res.origin_xy_km, destination_xy_km: res.destination_xy_km, land_label: res.land_label };
+    hReplayState.bergs = res.observed_bergs;
+    $("#hreplay-map-title").textContent = `Observed sea ice on ${res.map.observed_date}`;
+    drawReplay();
+    $("#hreplay-verdict").textContent = res.departure ?
+      `Departed ${res.departure} after waiting ${res.days_waited} day(s); ` +
+      (res.arrived ? `arrived ${res.arrival_day}.` : "did not arrive within the replay.") :
+      "No departure met the risk budget within the wait limit.";
+    const t = res.truth;
+    $("#hreplay-table tbody").replaceChildren(...(t ? [
+      ["Left on", t.planner.departure, t.naive.departure],
+      ["Hours (observed ice)", num(t.planner.hours, 1), num(t.naive.hours, 1)],
+      ["Fuel index", num(t.planner.fuel_index), num(t.naive.fuel_index)],
+      ["Distance (km)", num(t.planner.distance_km), num(t.naive.distance_km)],
+      ["Cells in observed ice ≥ limit", t.planner.observed_breach_cells, t.naive.observed_breach_cells],
+      ["Hours in observed ice ≥ limit", num(t.planner.hazard_hours, 1), num(t.naive.hazard_hours, 1)],
+      ["Cells in a reported berg's footprint", t.planner.berg_footprint_cells, t.naive.berg_footprint_cells],
+      ["Nearest reported berg (km)", `${num(t.planner.berg_min_distance_km)} (${t.planner.berg_nearest || "–"})`,
+        `${num(t.naive.berg_min_distance_km)} (${t.naive.berg_nearest || "–"})`],
+    ] : []).map(([k, a, b]) => el("tr", {}, el("td", {}, k), el("td", { class: "num" }, a), el("td", { class: "num" }, b))));
+    renderLog("#hreplay-log", res.days.map((d) => ({ ...d, event: d.phase })));
+    const s = seasonText(res.historical.season);
+    status.textContent = `${res.data_label} · icebergs included · ${s.text}`;
+  } catch (e) {
+    status.textContent = "Error: " + errText(e);
+  } finally {
+    $("#hreplay-btn").disabled = false;
+  }
+});
+
+function redrawHist(tab) {
+  if (tab === "hroute") drawHistMap("#hroute-map", hRouteState, "#hroute-map-legend");
+  if (tab === "hwindow") {
+    if (hWinState.result) drawWindow(hWinState.result, hWinState.result.risk_budget, "#hwindow-chart", hWinState);
+    drawHistMap("#hwindow-map", hWinMapState, "#hwindow-map-legend");
+  }
+  if (tab === "hvoyage") { drawHistMap("#hvoyage-map", hVoyState, "#hvoyage-map-legend"); drawReplay(); }
+}
+
 /* ------------------------------------------------------------- boot */
 (async () => {
   try {
@@ -580,12 +965,20 @@ async function loadReal(status) {
     showRealUnavailable("API unavailable: " + e.message);
   }
   setModeBadge(currentTab());
+  setupHistorical(window.__status ? window.__status.historical : null);
   if (window.__status) {
     try { await loadReal(window.__status); } catch (e) { showRealUnavailable("Could not load real data: " + e.message); }
+    if (window.__status.historical && window.__status.historical.status === "available") {
+      try { await loadHistoricalDates(); } catch (e) {
+        setupHistorical({ status: "failed", reason: "could not load the available dates: " + errText(e) });
+      }
+    }
   }
   window.addEventListener("resize", () => {
     if (mapState.plan && !$("#tab-plan").hidden) drawMap(mapState.plan);
     if (winState.result && !$("#tab-window").hidden) drawWindow(winState.result, budget());
     if (!$("#tab-real").hidden) redrawReal();
+    const tab = currentTab();
+    if (isHist(tab)) redrawHist(tab);
   });
 })();
