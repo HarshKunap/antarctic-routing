@@ -17,6 +17,10 @@ POST /real/simulate[?wait=true]              the voyage /real/plan chose, sailed
                                              ice with the existing daily replanning, as playback frames (job; see
                                              :mod:`antarctic_routing.simulation`)
 
+``/real/plan`` and ``/real/simulate`` also accept an issue date after the archive's last day: such dates are
+planned in **forecast mode** (``metadata.mode == "forecast"``), the same engine from a labelled analogue start
+with proxy sea ice and forcing and the latest official iceberg list (see :mod:`antarctic_routing.forecast_mode`).
+
 Routes, departure windows, voyages and replays take an optional ``origin`` and ``destination`` (a preset id
 ``{"preset": "palmer_station"}`` or a point ``{"lat": .., "lon": ..}``; both or neither). Points are snapped to
 the nearest navigable 25 km cell (never onto land) and the forecast horizon is computed for that route (see
@@ -48,6 +52,24 @@ from pydantic import BaseModel, Field
 
 from antarctic_routing import DISCLAIMER
 from antarctic_routing.common.provenance import utc_now
+from antarctic_routing.forecast_mode import (
+    BANNERS as FORECAST_BANNERS,
+)
+from antarctic_routing.forecast_mode import (
+    DATA_STATUS as FORECAST_DATA_STATUS,
+)
+from antarctic_routing.forecast_mode import (
+    EXECUTION_MODE as FORECAST_EXECUTION_MODE,
+)
+from antarctic_routing.forecast_mode import (
+    ForecastPlanner,
+    ForecastUnavailable,
+    forecast_metadata,
+    forecast_usnic,
+    is_forecast_date,
+    resolve,
+    shift_dates,
+)
 from antarctic_routing.forecasting.scenarios import grid_of
 from antarctic_routing.historical import (
     DATA_STATUS,
@@ -296,10 +318,24 @@ def register(app: FastAPI, svc) -> HistoricalService:
 
     @app.get("/real/historical/dates")
     def historical_dates(origin: str | None = Query(None, max_length=40),
-                         destination: str | None = Query(None, max_length=40)):
+                         destination: str | None = Query(None, max_length=40),
+                         origin_lat: float | None = Query(None, ge=-90, le=90),
+                         origin_lon: float | None = Query(None, ge=-180, le=180),
+                         destination_lat: float | None = Query(None, ge=-90, le=90),
+                         destination_lon: float | None = Query(None, ge=-180, le=180)):
+        """Supported dates; each end is a preset id, or a point given by ``*_lat`` and ``*_lon``."""
         a = hs.archive()
-        to_loc = lambda pid: None if pid is None else LocationIn(preset=pid)   # noqa: E731
-        _, _, h, spec = ends(to_loc(origin), to_loc(destination))
+
+        def to_loc(pid, lat, lon):
+            if pid is not None or (lat is None and lon is None):
+                return None if pid is None else LocationIn(preset=pid)
+            if lat is None or lon is None:
+                raise HTTPException(422, {"status": "invalid_location", "label": LABEL,
+                                          "reason": "a point needs both latitude and longitude"})
+            return LocationIn(lat=lat, lon=lon)
+
+        _, _, h, spec = ends(to_loc(origin, origin_lat, origin_lon),
+                             to_loc(destination, destination_lat, destination_lon))
         n_route, n_window = 1 + h, a.params["window_days"] + h
         out = {**_labels(a), "horizon_days": h, "window_days_max": a.params["window_days"],
                "route_dates": [d.isoformat() for d in a.available(n_route)],
@@ -307,7 +343,40 @@ def register(app: FastAPI, svc) -> HistoricalService:
                "seasons": {"route": a.coverage(n_route), "window": a.coverage(n_window)}}
         if spec is not None:
             out["route"] = spec.to_dict()
+        out["forecast"] = forecast_dates(a, n_window)
         return out
+
+    forecast_dates_cache: dict[int, dict] = {}
+
+    def forecast_dates(a: HistoricalArchive, n_days: int) -> dict:
+        """Requested dates after the archive that forecast mode can plan (an analogue start and a recent
+        official iceberg list exist), for the date picker."""
+        if n_days in forecast_dates_cache:
+            return forecast_dates_cache[n_days]
+        fm = a.spec.get("forecast_mode", {})
+        info = {"mode": "forecast", "label": fm.get("label", "Forecast / hackathon estimate"),
+                "disclosure": fm.get("disclosure"), "banners": FORECAST_BANNERS, "dates": [],
+                "first": None, "last": None, "available": False, "reason": None}
+        try:
+            usnic = forecast_usnic(a)
+        except ForecastUnavailable as exc:
+            info["reason"] = str(exc)
+            return info
+        latest = max(d for d, _, _ in usnic.lists)
+        day, stop = a.days[-1] + timedelta(days=1), latest + timedelta(days=int(fm.get("usnic_max_age_days", 120)))
+        dates = []
+        while day <= stop:
+            try:
+                resolve(a, day, n_days, usnic)
+                dates.append(day.isoformat())
+            except ForecastUnavailable:
+                pass
+            day += timedelta(days=1)
+        info.update(dates=dates, first=dates[0] if dates else None, last=dates[-1] if dates else None,
+                    available=bool(dates), reason=None if dates else "no date after the archive has an analogue "
+                    "start and a recent official iceberg list")
+        forecast_dates_cache[n_days] = info
+        return info
 
     @app.get("/real/locations")
     def locations():
@@ -318,7 +387,12 @@ def register(app: FastAPI, svc) -> HistoricalService:
                          "navigable_cells": int(res.navigable.sum())},
                 "snapping": "A location on land, or in ocean cut off from the open sea, moves to the nearest "
                             f"navigable 25 km cell within {MAX_SNAP_KM:.0f} km; it is never placed on land.",
-                "note": "Presets are research waypoints for decision support, not approved anchorages."}
+                "note": "Presets are research waypoints for decision support, not approved anchorages.",
+                # For the dashboard's "Pick on map": the routing grid, its land mask and each cell centre's
+                # WGS84 position (display and click-to-coordinate only; snapping stays on the server).
+                "map": {**grid_geometry(g), "land": res.land.astype(np.uint8).ravel().tolist(),
+                        "navigable": res.navigable.astype(np.uint8).ravel().tolist(),
+                        "lat": np.round(g.lat2d, 4).ravel().tolist(), "lon": np.round(g.lon2d, 4).ravel().tolist()}}
 
     @app.post("/real/locations/resolve")
     def resolve_locations(req: ResolveRequest):
@@ -338,7 +412,8 @@ def register(app: FastAPI, svc) -> HistoricalService:
     plan_cache: dict[tuple, dict] = {}
     plan_cache_lock = threading.Lock()
 
-    def select_plan(planner: HistoricalPlanner, issue: date, window_days: int, o, d, n_days: int):
+    def select_plan(planner: HistoricalPlanner, issue: date, window_days: int, o, d, n_days: int,
+                    key: tuple | None = None):
         """The departure window from one issue and the route it stands for (what /real/plan shows)."""
         p, r, vessel = planner.archive.params, cfg.routing, svc.vessel
         world, snap = planner.world(issue, n_days)
@@ -357,36 +432,109 @@ def register(app: FastAPI, svc) -> HistoricalService:
             risk = risk_breakdown(cand.route, world, vessel, option.lead_days * step, r.confidence,
                                   cand.evaluation, r.risk_budget)
         with plan_cache_lock:
-            plan_cache[(tuple(o), tuple(d), issue, window_days)] = {
+            plan_cache[key or (tuple(o), tuple(d), issue, window_days)] = {
                 "recommended": sweep.selected is not None, "explanation": sweep.explanation,
                 "option": option, "cand": cand, "route": route, "risk": risk}
             while len(plan_cache) > 16:
                 plan_cache.pop(next(iter(plan_cache)))
         return world, snap, sweep, option, cand, route, risk
 
+    def plan_result(planner, issue: date, window_days: int, include_layers: bool, o, d, n_days: int,
+                    key: tuple | None = None) -> tuple[dict, object, object]:
+        """Window, route, risk, daily timeline, layers and berg tracks (shared by both modes)."""
+        vessel = svc.vessel
+        world, snap, sweep, option, cand, route, risk = select_plan(planner, issue, window_days, o, d, n_days, key)
+        daily, layers = [], None
+        if cand is not None:
+            daily = daily_timeline(cand.route, world, vessel, issue, option.lead_days,
+                                   cand.evaluation.expected_hours, risk)
+            if include_layers:
+                layers = {"grid": grid_geometry(world.grid), "land": world.land.astype(np.uint8).ravel().tolist(),
+                          "vessel_limit": vessel.tau,
+                          "layers": environment_layers(world, vessel.tau, [x["scenario_layer"] for x in daily])}
+        status = ("recommended" if sweep.selected is not None
+                  else "no_feasible_departure" if cand is not None else "no_route")
+        body = {
+            "status": status, "explanation": sweep.explanation,
+            "route": route, "risk": risk,
+            "departure": {"recommended": sweep.to_dict()["selected"], "rule": sweep.rule,
+                          "explanation": sweep.explanation, "options": [x.to_dict() for x in sweep.options],
+                          "depart_on_issue_date": sweep.options[0].to_dict()},
+            "alternatives": ([svc.candidate_payload(c, world) for c in option.plan.candidates]
+                             if option is not None else []),
+            "daily": daily, "daily_note": TIMELINE_NOTE, "layers": layers,
+            "icebergs": snap.summary(), "iceberg_tracks": tracks(planner, world, snap),
+        }
+        return body, world, snap
+
+    def forecast_setup(issue: date, n_days: int):
+        a = hs.archive()
+        try:
+            return resolve(a, issue, n_days, forecast_usnic(a))
+        except ForecastUnavailable as exc:
+            raise HTTPException(422, {"status": "forecast_unavailable", "reason": str(exc),
+                                      "label": "Forecast / hackathon estimate"}) from None
+
+    def forecast_meta(a: HistoricalArchive, setup, snap, n_days: int, members: int, planner, **extra) -> dict:
+        fm = forecast_metadata(a, setup, snap, provenance(a, cfg, setup.analogue, n_days, snap, planner), members)
+        return {"mode": "forecast", "label": fm["label"], "execution_mode": FORECAST_EXECUTION_MODE,
+                "data_status": FORECAST_DATA_STATUS, "issue_date": setup.requested.isoformat(),
+                "requested_date": setup.requested.isoformat(), "hindsight_forcing": False,
+                "proxy_forcing": True, "forecast_disclosure": fm["disclosure"], "banners": FORECAST_BANNERS,
+                "disclaimer": DISCLAIMER, **extra, "forecast": fm}
+
+    FORECAST_SIM_NOTE = (
+        "Forecast-estimate voyage simulation: the vessel sails the planned route one day at a time through the "
+        "analogue season's observed sea ice (a proxy, not an observation of the requested dates); each following "
+        "day a new forecast is issued from the same proxy inputs (frozen U-Net, analogue ERA5/CMEMS reanalysis, "
+        "the latest official USNIC list held at its last positions, calibrated drift) and the existing replanning "
+        "rules decide whether to keep or change the route. Dates are shown on the requested timeline; the analogue "
+        "dates are listed under Data & Confidence. Positions are the last route cell reached each day (25 km cells).")
+
+    # Engine dates are analogue dates; these subtrees hold real-world dates and are never shifted.
+    REAL_DATES = frozenset({"icebergs", "provenance", "analogue_date"})
+
+    def relabel_proxy(body: dict) -> dict:
+        """In forecast mode the scenario-layer-0 'observed' ice is the analogue season's: say so."""
+        for x in body.get("daily") or []:
+            if x.get("layer_source") == "observed":
+                x["layer_source"] = "proxy_analogue_observed"
+        for x in (body.get("layers") or {}).get("layers", []):
+            if x.get("source") == "observed":
+                x["source"] = "proxy_analogue_observed"
+        return body
+
     @app.post("/real/plan")
     def real_plan(req: PlanRequest):
-        """Locations -> joint real scenarios -> departure window -> route -> risk split -> daily timeline."""
+        """Locations -> joint real scenarios -> departure window -> route -> risk split -> daily timeline.
+
+        Dates after the archive are planned in forecast mode (labelled analogue start; see forecast_mode)."""
         spec = hs.route(req.origin, req.destination)
         o, d, h = *spec.cells, spec.horizon_days
         n_days = req.window_days + h
+        ends_out = {"locations": {"origin": spec.origin.to_dict(), "destination": spec.destination.to_dict()},
+                    "horizon": spec.horizon.to_dict()}
+        if is_forecast_date(hs.archive(), req.issue):
+            setup = forecast_setup(req.issue, n_days)
+            with svc.inline_slot():
+                planner = ForecastPlanner(hs.planner(), setup)
+                body, world, snap = plan_result(planner, setup.analogue, req.window_days, req.include_layers, o, d,
+                                                n_days, key=("forecast", tuple(o), tuple(d), req.issue,
+                                                             req.window_days))
+            a = planner.archive
+            meta = forecast_meta(a, setup, snap, n_days, world.n_scenarios, planner,
+                                 window_days=req.window_days, horizon_days=h, scenario_days=n_days,
+                                 n_scenarios=world.n_scenarios,
+                                 layer_source=["proxy_analogue_observed" if x == "observed" else x
+                                               for x in world.layer_source])
+            body = shift_dates(relabel_proxy(body), setup.offset_days, REAL_DATES)
+            out = {"status": body["status"], "explanation": body["explanation"], "metadata": meta, **ends_out}
+            out.update({k: v for k, v in body.items() if k not in out})
+            return json_safe(out)
         a = coverage_or_422(req.issue, n_days)
         with svc.inline_slot():
             planner = hs.planner()
-            vessel = svc.vessel
-            world, snap, sweep, option, cand, route, risk = select_plan(planner, req.issue, req.window_days, o, d,
-                                                                        n_days)
-            daily, layers = [], None
-            if cand is not None:
-                daily = daily_timeline(cand.route, world, vessel, req.issue, option.lead_days,
-                                       cand.evaluation.expected_hours, risk)
-                if req.include_layers:
-                    layers = {"grid": grid_geometry(world.grid), "land": world.land.astype(np.uint8).ravel().tolist(),
-                              "vessel_limit": vessel.tau,
-                              "layers": environment_layers(world, vessel.tau, [x["scenario_layer"] for x in daily])}
-            berg_tracks = tracks(planner, world, snap)
-        status = ("recommended" if sweep.selected is not None
-                  else "no_feasible_departure" if cand is not None else "no_route")
+            body, world, snap = plan_result(planner, req.issue, req.window_days, req.include_layers, o, d, n_days)
         meta = {
             "mode": "historical", "label": LABEL, "execution_mode": "real", "data_status": DATA_STATUS,
             "issue_date": req.issue.isoformat(), "hindsight_forcing": True,
@@ -395,57 +543,68 @@ def register(app: FastAPI, svc) -> HistoricalService:
             "n_scenarios": world.n_scenarios, "layer_source": world.layer_source,
             "provenance": provenance(a, cfg, req.issue, n_days, snap, planner),
         }
-        out = {
-            "status": status, "explanation": sweep.explanation, "metadata": meta,
-            "locations": {"origin": spec.origin.to_dict(), "destination": spec.destination.to_dict()},
-            "horizon": spec.horizon.to_dict(),
-            "route": route, "risk": risk,
-            "departure": {"recommended": sweep.to_dict()["selected"], "rule": sweep.rule,
-                          "explanation": sweep.explanation, "options": [x.to_dict() for x in sweep.options],
-                          "depart_on_issue_date": sweep.options[0].to_dict()},
-            "alternatives": ([svc.candidate_payload(c, world) for c in option.plan.candidates]
-                             if option is not None else []),
-            "daily": daily, "daily_note": TIMELINE_NOTE, "layers": layers,
-            "icebergs": snap.summary(), "iceberg_tracks": berg_tracks,
-        }
+        out = {"status": body["status"], "explanation": body["explanation"], "metadata": meta, **ends_out}
+        out.update({k: v for k, v in body.items() if k not in out})
         return json_safe(out)
 
     @app.post("/real/simulate")
     def real_simulate(req: SimulateRequest, wait: bool = Query(False)):
-        """Simulate the voyage /real/plan chose, day by day, with the existing daily replanning (job)."""
+        """Simulate the voyage /real/plan chose, day by day, with the existing daily replanning (job).
+
+        In forecast mode the same simulation runs on the analogue days with the forecast-mode planner; the
+        'observed' ice it sails through is the analogue season's (labelled proxy) and dates are shown on the
+        requested timeline."""
         spec = hs.route(req.origin, req.destination)
         o, d, h = *spec.cells, spec.horizon_days
         n_days = req.window_days + h
-        a = coverage_or_422(req.issue, n_days)
+        forecast = is_forecast_date(hs.archive(), req.issue)
+        setup = forecast_setup(req.issue, n_days) if forecast else None
+        a = hs.archive() if forecast else coverage_or_422(req.issue, n_days)
+        engine_issue = setup.analogue if forecast else req.issue
+        key = (("forecast", tuple(o), tuple(d), req.issue, req.window_days) if forecast
+               else (tuple(o), tuple(d), req.issue, req.window_days))
+        to_engine = (lambda x: x - timedelta(days=setup.offset_days)) if forecast else (lambda x: x)  # noqa: E731
 
         def work():
             from antarctic_routing.simulation import VoyageSimulator
 
-            planner = hs.planner()
+            planner = ForecastPlanner(hs.planner(), setup) if forecast else hs.planner()
             r, p = cfg.routing, a.params
             with plan_cache_lock:
-                hit = plan_cache.get((tuple(o), tuple(d), req.issue, req.window_days))
+                hit = plan_cache.get(key)
             if hit is None:
-                select_plan(planner, req.issue, req.window_days, o, d, n_days)
+                select_plan(planner, engine_issue, req.window_days, o, d, n_days, key)
                 with plan_cache_lock:
-                    hit = plan_cache[(tuple(o), tuple(d), req.issue, req.window_days)]
+                    hit = plan_cache[key]
             option, cand = hit["option"], hit["cand"]
-            base = {**_labels(a), "metadata": {
-                "mode": "historical", "label": LABEL, "execution_mode": "real", "data_status": DATA_STATUS,
-                "issue_date": req.issue.isoformat(), "hindsight_forcing": True,
-                "hindsight_disclosure": a.spec["hindsight_forcing"], "banners": BANNERS, "disclaimer": DISCLAIMER,
-                "window_days": req.window_days, "horizon_days": h, "n_scenarios": p["members"]},
-                "locations": {"origin": spec.origin.to_dict(), "destination": spec.destination.to_dict()}}
+            if forecast:
+                snap = planner.snapshot(engine_issue, grid_of(a.ds))
+                meta = forecast_meta(a, setup, snap, n_days, p["members"], planner, window_days=req.window_days,
+                                     horizon_days=h, n_scenarios=p["members"])
+                base = {"execution_mode": FORECAST_EXECUTION_MODE, "data_status": FORECAST_DATA_STATUS,
+                        "data_label": meta["label"], "hindsight_forcing": False, "disclaimer": DISCLAIMER,
+                        "metadata": meta}
+            else:
+                base = {**_labels(a), "metadata": {
+                    "mode": "historical", "label": LABEL, "execution_mode": "real", "data_status": DATA_STATUS,
+                    "issue_date": req.issue.isoformat(), "hindsight_forcing": True,
+                    "hindsight_disclosure": a.spec["hindsight_forcing"], "banners": BANNERS,
+                    "disclaimer": DISCLAIMER, "window_days": req.window_days, "horizon_days": h,
+                    "n_scenarios": p["members"]}}
+            base["locations"] = {"origin": spec.origin.to_dict(), "destination": spec.destination.to_dict()}
+            shown = (lambda x: setup.requested_day(x)) if forecast else (lambda x: x)  # noqa: E731
             if cand is None:
                 return {**base, "status": "not_simulated", "reason": "the plan found no route to sail"}
-            if req.departure is not None and req.departure != option.departure:
+            if req.departure is not None and to_engine(req.departure) != option.departure:
                 return {**base, "status": "not_simulated",
-                        "reason": f"the plan for these inputs departs {option.departure}, not {req.departure}"}
+                        "reason": f"the plan for these inputs departs {shown(option.departure)}, "
+                                  f"not {req.departure}"}
             dep = option.departure
             sea_days = max(1, math.ceil(cand.evaluation.expected_hours / 24)) \
                 if math.isfinite(cand.evaluation.expected_hours) else 1
-            gaps = [f"{dep + timedelta(days=k)}: {'; '.join(pr)}" for k in range(1, sea_days + 1)
-                    if (pr := a.problems(dep + timedelta(days=k), 1 + h))]
+            check = planner.problems if forecast else a.problems
+            gaps = [f"{shown(dep + timedelta(days=k))}: {'; '.join(pr)}" for k in range(1, sea_days + 1)
+                    if (pr := check(dep + timedelta(days=k), 1 + h))]
             if gaps:
                 return {**base, "status": "not_simulated",
                         "reason": "the archive cannot issue the daily forecasts this voyage needs (" +
@@ -454,16 +613,32 @@ def register(app: FastAPI, svc) -> HistoricalService:
             sim = VoyageSimulator(planner, svc.vessel, policy, r.risk_weights, r.connectivity, p["scenario_routes"],
                                   p["seed"], h).run(dep, cand.route, cand.evaluation, hit["risk"])
             grid = grid_of(a.ds)
-            base["metadata"].update(departure_date=dep.isoformat(), simulation_note=sim.pop("note"),
-                                    provenance=provenance(a, cfg, req.issue, n_days, None, planner))
-            return json_safe({
-                **base, "status": "simulated",
-                "plan": {"status": "recommended" if hit["recommended"] else "no_feasible_departure",
-                         "explanation": hit["explanation"], "route": hit["route"],
-                         "risk": {k: hit["risk"][k] for k in ("combined", "sea_ice", "iceberg", "risk_budget")}},
-                "grid": {**grid_geometry(grid), "land": a.ds["land_mask"].values.astype(np.uint8).ravel().tolist(),
-                         "vessel_limit": svc.vessel.tau},
-                **sim})
+            note = sim.pop("note")
+            out = {"status": "simulated",
+                   "plan": {"status": "recommended" if hit["recommended"] else "no_feasible_departure",
+                            "explanation": hit["explanation"], "route": hit["route"],
+                            "risk": {k: hit["risk"][k] for k in ("combined", "sea_ice", "iceberg", "risk_budget")}},
+                   "grid": {**grid_geometry(grid), "land": a.ds["land_mask"].values.astype(np.uint8).ravel().tolist(),
+                            "vessel_limit": svc.vessel.tau},
+                   **sim}
+            if forecast:
+                for f in out["frames"]:
+                    if f.get("map") and f["map"].get("source") == "observed":
+                        f["map"]["source"] = "proxy_analogue_observed"
+                    f["observed"]["sea_ice_source"] = "proxy_analogue_observed"
+                    seg = f["observed"].get("sea_ice_on_segment")
+                    if seg:                 # the analogue day's real observation, shown on the requested day
+                        seg.update(source="proxy_analogue_observed", analogue_date=seg["date"])
+                out["summary"]["notes"]["forecast_mode"] = (
+                    "Forecast mode: the 'observed' sea ice sailed through and scored against is the analogue "
+                    "season's real observation (a proxy, not the requested year), and icebergs are held at their "
+                    "last official report.")
+                out = shift_dates(out, setup.offset_days, REAL_DATES)
+                base["metadata"].update(departure_date=shown(dep).isoformat(), simulation_note=FORECAST_SIM_NOTE)
+            else:
+                base["metadata"].update(departure_date=dep.isoformat(), simulation_note=note,
+                                        provenance=provenance(a, cfg, req.issue, n_days, None, planner))
+            return json_safe({**base, **out})
 
         return svc.submit("real_simulate", work, wait)
 

@@ -102,6 +102,13 @@ class VoyageSimulator:
 
         self.grid = grid_of(self.ds)
         self.land = self.ds["land_mask"].values.astype(bool)
+        # forecast mode's planner brings its own coverage rule and iceberg snapshot (forecast_mode.py)
+        self.problems = getattr(planner, "problems", None) or self.archive.problems
+        self._usnic = getattr(planner, "usnic_positions", None) or self._archive_usnic
+
+    def _archive_usnic(self, day: date):
+        list_date, path, _, bergs = self.archive.usnic.positions(day, self.archive.params["usnic_max_age_days"])
+        return list_date, path, (day - list_date).days, bergs
 
     # ------------------------------------------------------------------ observations (display)
     def observed_layer(self, day: date) -> dict | None:
@@ -121,12 +128,11 @@ class VoyageSimulator:
                 "max_concentration": float(v.max()) if v.size else None}
 
     def usnic(self, day: date, position) -> dict:
-        p = self.archive.params
-        list_date, path, _, bergs = self.archive.usnic.positions(day, p["usnic_max_age_days"])
+        list_date, path, age, bergs = self._usnic(day)
         lat, lon = self.grid.cell_latlon(*position)
         inside = [b for b in bergs if self._in_grid(b[1], b[2])]
         near = min(((float(haversine_m(lat, lon, b[1], b[2])) / 1000.0, b[0]) for b in inside), default=None)
-        return {"list_date": list_date.isoformat(), "file": path.name, "age_days": (day - list_date).days,
+        return {"list_date": list_date.isoformat(), "file": path.name, "age_days": age,
                 "in_grid": [{"id": b[0], "lat": b[1], "lon": b[2],
                              "xy_km": [float(v) / 1000 for v in self.grid.to_xy(b[1], b[2])]} for b in inside],
                 "nearest_km": round(near[0], 1) if near else None, "nearest_id": near[1] if near else None}
@@ -207,7 +213,7 @@ class VoyageSimulator:
                                "timestamp_utc": _iso(t0 + timedelta(hours=sailed_hours[-1])),
                                "explanation": "Destination reached."})
                 break
-            problems = a.problems(day, 1 + self.h)
+            problems = self.problems(day, 1 + self.h)
             if problems:
                 reason = f"no Real Historical Data forecast for {day}: " + "; ".join(problems)
                 stop = Route("stopped", list(route.cells[route.cells.index(position):]), [0.0], 0.0, 0.0)

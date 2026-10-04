@@ -57,6 +57,10 @@ const NX = 6, NY = 5;
 const grid = { crs: "EPSG:3031", nx: NX, ny: NY, res_km: 25, x0_km: 0, y0_km: 0, rotation_rad: 0,
   x_km: [...Array(NX).keys()].map((i) => 12.5 + 25 * i), y_km: [...Array(NY).keys()].map((j) => 12.5 + 25 * j) };
 const land = Array(NX * NY).fill(0); land[NX * NY - 1] = 1;
+// GET /real/locations' "map": the grid, its land mask and each cell centre's WGS84 position (stand-in values)
+const pickMap = { ...grid, land, navigable: land.map((l) => 1 - l),
+  lat: [...Array(NX * NY).keys()].map((k) => -60 - 0.25 * Math.floor(k / NX)),
+  lon: [...Array(NX * NY).keys()].map((k) => -62 + 0.4 * (k % NX)) };
 const layer = (k, ice) => ({ scenario_layer: k, date: `2023-11-${14 + k}`, source: k ? "forecast" : "observed",
   p_ice_ge_limit_pct: land.map((l, i) => (l ? null : (i * ice) % 100)), p_berg_pct: land.map((l, i) => (l ? null : i === 8 ? 40 : 0)) });
 
@@ -191,7 +195,7 @@ function makeSim(replan = true) {
 const TYPES = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css" };
 
 async function openDashboard(browser, { plan = () => ({ status: 200, body: makePlan() }), historical = "available",
-  simulate = () => ({ status: 200, body: makeSim(true) }), dates = datesPayload } = {}) {
+  simulate = () => ({ status: 200, body: makeSim(true) }), dates = datesPayload, datesFor = null } = {}) {
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
   const calls = [];
   const errors = [];
@@ -215,8 +219,11 @@ async function openDashboard(browser, { plan = () => ({ status: 200, body: makeP
           : { status: "unavailable", reason: "no archive configured" },
         figures: { execution_mode: "controlled_synthetic" } });
     }
-    if (p === "/real/locations") return json({ label: "Real Historical Data", presets: PRESETS, max_snap_km: 60 });
-    if (p === "/real/historical/dates") return json(dates);
+    if (p === "/real/locations") return json({ label: "Real Historical Data", presets: PRESETS, max_snap_km: 60, map: pickMap });
+    if (p === "/real/historical/dates") {
+      if (datesFor) { const r = datesFor(url.searchParams); return json(r.body, r.status || 200); }
+      return json(dates);
+    }
     if (p === "/real/plan") {
       const r = await plan(JSON.parse(req.postData() || "{}"));
       if (r.abort) return route.abort("failed");
@@ -254,13 +261,56 @@ test("Plan Route is the default view and shows a clean landing, no precomputed r
   const { page, errors, planCalls } = await openDashboard(browser);
   await ready(page);
   assert.equal(await page.locator('.tabs button[aria-selected="true"]').getAttribute("data-tab"), "product");
+  assert.equal(await text(page, '.primary-nav button[aria-selected="true"]'), "Plan Route");
   assert.ok(await page.locator("#pr-landing").isVisible());
+  assert.ok(await page.locator("#pr-pick-map").isVisible());
   assert.ok(!(await page.locator("#pr-result").isVisible()));
-  assert.match(await text(page, "#pr-landing"), /Origin[\s\S]*Destination[\s\S]*Date[\s\S]*Plan Route/);
+  assert.match(await text(page, "#pr-landing"), /Start[\s\S]*Destination[\s\S]*Departure date[\s\S]*Plan Route/);
   assert.equal(planCalls().length, 0);
-  assert.match(await text(page, ".tabs"), /Research & legacy views/i);
-  assert.match(await text(page, ".tabs"), /Synthetic sandbox \(demo only\)/i);
   assert.deepEqual(errors, []);
+  await page.close();
+});
+
+test("the primary navigation has only the three product pages; research and synthetic views are tucked away", { skip }, async () => {
+  const { page } = await openDashboard(browser);
+  await ready(page);
+  assert.deepEqual(await page.locator(".primary-nav button").allInnerTexts(), ["Plan Route", "Voyage Simulation", "Data & Confidence"]);
+  const primary = await text(page, ".primary-nav");
+  for (const s of ["synthetic", "Validation", "Research", "Frozen demo", "Departure window", "Route plan"]) {
+    assert.ok(!primary.includes(s), s);
+  }
+  assert.equal(await page.locator("#dev-area").getAttribute("open"), null);          // collapsed by default
+  assert.ok(!(await page.locator('.dev-tabs button[data-tab="plan"]').isVisible()));
+  await page.click("#dev-area summary");
+  assert.match(await text(page, ".dev-tabs"), /Research & legacy views[\s\S]*Synthetic sandbox \(demo only\)/i);
+  await page.click('.dev-tabs button[data-tab="plan"]');
+  assert.ok(await page.locator("#dev-banner").isVisible());
+  assert.ok(!(await page.locator("#tab-product").isVisible()));
+  assert.equal(await page.locator('.primary-nav button[aria-selected="true"]').count(), 0);
+  await page.click("#dev-back");
+  assert.ok(await page.locator("#tab-product").isVisible());
+  assert.ok(!(await page.locator("#dev-banner").isVisible()));
+  await page.close();
+});
+
+test("Voyage Simulation and Data & Confidence before any plan point back to Plan Route", { skip }, async () => {
+  const { page, calls } = await openDashboard(browser);
+  await ready(page);
+  await page.click('.primary-nav button[data-view="sim"]');
+  assert.ok(await page.locator("#sim-empty").isVisible());
+  assert.match(await text(page, "#sim-empty"), /No route planned yet\.[\s\S]*← Plan a route/);
+  assert.ok(!(await page.locator("#pr-form").isVisible()));
+  assert.equal(simCalls(calls).length, 0);
+  await page.click('.primary-nav button[data-view="data"]');
+  assert.ok(await page.locator("#data-empty").isVisible());
+  const data = await text(page, "#pr-data");
+  for (const s of ["OSI SAF sea ice", "Residual U-Net sea-ice forecast", "USNIC icebergs", "ERA5 winds",
+    "Copernicus Marine (CMEMS) currents", "Sea-ice forecasting", "Iceberg drift", "Uncertainty", "Wilson risk",
+    "Time-dependent routing", "Calibration", "Real Historical Data", "Forecast / hackathon estimate"]) assert.ok(data.includes(s), s);
+  assert.ok(!(await page.locator("#pr-data-result").isVisible()));
+  await page.click('#data-empty [data-goto="plan"]');
+  assert.ok(await page.locator("#pr-form").isVisible());
+  assert.equal(await text(page, '.primary-nav button[aria-selected="true"]'), "Plan Route");
   await page.close();
 });
 
@@ -268,7 +318,7 @@ test("locations come from GET /real/locations and dates from the route's support
   const { page, calls } = await openDashboard(browser);
   await ready(page);
   const ids = await page.locator("#pr-origin option").evaluateAll((os) => os.map((o) => o.value));
-  assert.deepEqual(ids, PRESETS.map((p) => p.id));
+  assert.deepEqual(ids, [...PRESETS.map((p) => p.id), "__map__"]);
   assert.equal(await page.inputValue("#pr-origin"), "alpha");
   assert.equal(await page.inputValue("#pr-destination"), "bravo");
   const d = calls.find((c) => c.path === "/real/historical/dates" && c.search);
@@ -285,7 +335,7 @@ test("a snapped location shows a non-blocking note with requested and routing co
   await page.selectOption("#pr-destination", "charlie");
   await ready(page);
   const notes = await text(page, "#pr-notes");
-  assert.match(notes, /Destination snapped 12\.4 km to the nearest open-water grid cell/);
+  assert.match(notes, /Destination moved 12\.4 km to open water/);
   assert.match(notes, /requested -62\.000°, -61\.000°, routing from -61\.900°, -60\.700°/);
   assert.equal(await page.isDisabled("#pr-submit"), false);
   await page.close();
@@ -314,7 +364,7 @@ test("Plan Route sends exactly one POST /real/plan with the chosen inputs and sh
   await page.click("#pr-submit");
   await page.waitForSelector("#pr-loading:not([hidden])");
   const loading = await text(page, "#pr-loading");
-  assert.match(loading, /Running the real historical model/);
+  assert.match(loading, /Building route estimate[\s\S]*\(real historical data\)\. Evaluating sea ice, iceberg scenarios, wind and current forcing, route alternatives and departure dates/);
   assert.doesNotMatch(loading, /\d+\s*%/);                 // elapsed seconds only, no fake progress percentage
   assert.equal(await page.isDisabled("#pr-submit"), true);
   await planned(page);
@@ -355,6 +405,8 @@ test("no recommended departure: says so and shows the least-risky option as not 
   assert.match(await text(page, "#pr-verdict-text"), /least-risky option for reference only: depart 2023-11-16/);
   assert.match(await text(page, "#pr-metrics"), /Least-risky departure/i);
   assert.match(await text(page, '[data-risk="combined"]'), /exceeds budget[\s\S]*79\.1%/);
+  assert.match(await text(page, "#pr-window-rec"), /◆ No date meets the budget; least-risky shown: 2023-11-16/);
+  await page.click("#pr-options-more summary");                       // the full table is one click away
   assert.match(await text(page, "#pr-options tbody tr.rec"), /◆ 2023-11-16/);
   await page.close();
 });
@@ -394,6 +446,9 @@ test("departure options come straight from the response, with the shown one mark
   await ready(page);
   await page.click("#pr-submit");
   await planned(page);
+  assert.match(await text(page, "#pr-window-rec"), /★ Recommended departure: 2023-11-14 · risk upper bound 3\.1%/);
+  assert.equal(await page.locator("#pr-options-more").getAttribute("open"), null);   // concise: table collapsed
+  await page.click("#pr-options-more summary");
   const rows = await page.locator("#pr-options tbody tr").allInnerTexts();
   assert.equal(rows.length, 3);
   assert.match(rows[0], /★ 2023-11-14[\s\S]*meets budget[\s\S]*3\.1%[\s\S]*shown/);
@@ -410,7 +465,7 @@ test("the hindsight disclosure and Data & Confidence panel come from the respons
   assert.ok(await page.locator("#pr-disclosure").isVisible());
   assert.equal(await text(page, "#pr-disclosure"), DISCLOSURE);
   assert.match(await text(page, "#pr-banners"), /HISTORICAL MODE[\s\S]*ERA5\/CMEMS hindsight forcing[\s\S]*Research estimate, not certified navigation/i);
-  await page.click('.pr-steps button[data-view="data"]');
+  await page.click('.primary-nav button[data-view="data"]');
   assert.ok(await page.locator("#pr-data").isVisible());
   assert.ok(!(await page.locator("#pr-result").isVisible()));
   const data = await text(page, "#pr-data");
@@ -511,10 +566,11 @@ test("Simulate Voyage starts from the planned route without planning again", { s
   assert.equal(sc.length, 1);
   assert.deepEqual(JSON.parse(sc[0].body), { origin: { preset: "alpha" }, destination: { preset: "bravo" },
     issue: "2023-11-14", departure: "2023-11-14" });
-  assert.equal(await page.locator('.pr-steps button[aria-selected="true"]').getAttribute("data-view"), "sim");
+  assert.equal(await page.locator('.primary-nav button[aria-selected="true"]').getAttribute("data-view"), "sim");
   // back to the result and again: the frames are reused, nothing is recomputed
-  await page.click('.pr-steps button[data-view="result"]');
-  await page.click('.pr-steps button[data-view="sim"]');
+  await page.click('.primary-nav button[data-view="plan"]');
+  assert.ok(await page.locator("#pr-result").isVisible());
+  await page.click('.primary-nav button[data-view="sim"]');
   assert.equal(simCalls(calls).length, 1);
   assert.deepEqual(errors, []);
   await page.close();
@@ -655,7 +711,7 @@ for (const [name, opts, expect] of [
 test("a new plan clears the previous simulation", { skip }, async () => {
   const { page } = await openDashboard(browser);
   await simulated(page);
-  await page.click('.pr-steps button[data-view="plan"]');
+  await page.click('.primary-nav button[data-view="plan"]');
   await page.click("#pr-submit");
   await planned(page);
   assert.equal(await page.evaluate(() => sim.data), null);
@@ -681,15 +737,301 @@ test("an additional season from the archive is selectable with its evaluation la
   const bodies = [];
   const { page } = await openDashboard(browser, { dates, plan: (b) => { bodies.push(b); return { status: 200, body: makePlan() }; } });
   await ready(page);
-  const opts = await page.locator("#pr-season option").allInnerTexts();
-  assert.deepEqual(opts, ["2023-24 (50 dates)", "2024-25 (3 dates, independent evaluation)"]);
-  await page.selectOption("#pr-season", "2024-25");
-  assert.equal(await page.inputValue("#pr-issue"), "2024-11-14");
+  // No season list: the date alone picks the season, and the new season's dates are accepted as historical.
+  assert.equal(await page.locator("#pr-season").count(), 0);
+  await page.fill("#pr-issue", "2024-11-14");
+  await page.dispatchEvent("#pr-issue", "change");
+  assert.match(await text(page, "#pr-mode"), /REAL HISTORICAL DATA/);
   assert.equal(await page.getAttribute("#pr-issue", "max"), "2024-11-16");
   await page.click("#pr-submit");
   await page.waitForSelector("#pr-result:not([hidden])");
   assert.equal(bodies.length, 1);
   assert.equal(bodies[0].issue, "2024-11-14");
+  await page.close();
+});
+
+/* ------------------------------------------------------------- Pick on map / coordinates */
+// The dates endpoint resolves the chosen ends on the server (snapping included); this stand-in echoes a point.
+function datesForPoints(snap = {}) {
+  return (q) => {
+    const end = (role) => {
+      if (q.get(role)) { const p = PRESETS.find((x) => x.id === q.get(role)); return { ...p, cell: [p.resolved.row, p.resolved.col] }; }
+      const lat = Number(q.get(`${role}_lat`)), lon = Number(q.get(`${role}_lon`));
+      const s = snap[role];
+      return { id: null, name: `${lat.toFixed(4)}, ${lon.toFixed(4)}`, requested: { lat, lon }, cell: [2, 2],
+        resolved: { lat: s ? lat + 0.1 : lat, lon, row: 2, col: 2 }, snapped: Boolean(s), distance_km: s ? s : 3.2,
+        reason: s ? "the requested point is on land; moved to the nearest navigable routing cell" : "the requested point lies in a navigable routing cell" };
+    };
+    return { body: { ...datesPayload, route: { origin: end("origin"), destination: end("destination") } } };
+  };
+}
+const planBodies = (calls) => calls.filter((c) => c.path === "/real/plan").map((c) => JSON.parse(c.body));
+const datesQueries = (calls) => calls.filter((c) => c.path === "/real/historical/dates").map((c) => c.search);
+
+async function pickOnMap(page, role, fx, fy) {
+  await page.click(`#pr-pick-${role}`);
+  assert.ok(await page.locator("#pr-pick.picking").isVisible());
+  await page.locator("#pr-pick-map").scrollIntoViewIfNeeded();
+  const box = await page.locator("#pr-pick-map").boundingBox();
+  await page.mouse.click(box.x + box.width * fx, box.y + box.height * fy);
+  await ready(page);
+}
+
+test("a map-picked start and a preset destination plan through the coordinate API", { skip }, async () => {
+  const { page, calls, errors } = await openDashboard(browser, { datesFor: datesForPoints() });
+  await ready(page);
+  await pickOnMap(page, "origin", 0.4, 0.5);
+  assert.equal(await page.inputValue("#pr-origin"), "__map__");
+  const lat = Number(await page.inputValue("#pr-origin-lat")), lon = Number(await page.inputValue("#pr-origin-lon"));
+  assert.ok(lat <= -60 && lat >= -61.1 && lon >= -62.3 && lon <= -59.7, `${lat}, ${lon}`);
+  assert.ok(datesQueries(calls).at(-1).includes(`origin_lat=${lat}&origin_lon=${lon}&destination=bravo`));
+  assert.match(await text(page, "#pr-notes"), /Start is in open water: requested[\s\S]*not moved/);
+  await page.click("#pr-submit");
+  await planned(page);
+  assert.deepEqual(planBodies(calls), [{ origin: { lat, lon }, destination: { preset: "bravo" }, issue: "2023-11-14" }]);
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+test("a preset start and a map-picked destination", { skip }, async () => {
+  const { page, calls } = await openDashboard(browser, { datesFor: datesForPoints() });
+  await ready(page);
+  await pickOnMap(page, "destination", 0.6, 0.4);
+  await page.click("#pr-submit");
+  await planned(page);
+  const b = planBodies(calls)[0];
+  assert.deepEqual(b.origin, { preset: "alpha" });
+  assert.ok(Number.isFinite(b.destination.lat) && Number.isFinite(b.destination.lon) && !b.destination.preset);
+  await page.close();
+});
+
+test("both ends typed as coordinates; a point on land shows its move to open water", { skip }, async () => {
+  const { page, calls } = await openDashboard(browser, { datesFor: datesForPoints({ destination: 18 }) });
+  await ready(page);
+  for (const [role, lat, lon] of [["origin", "-60.25", "-61.5"], ["destination", "-61", "-60.2"]]) {
+    await page.selectOption(`#pr-${role}`, "__map__");
+    await page.fill(`#pr-${role}-lat`, lat);
+    await page.fill(`#pr-${role}-lon`, lon);
+    await page.dispatchEvent(`#pr-${role}-lon`, "change");
+  }
+  await ready(page);
+  const notes = await text(page, "#pr-notes");
+  assert.match(notes, /Destination moved 18\.0 km to open water: requested -61\.000°, -60\.200°, routing from -60\.900°, -60\.200°/);
+  assert.match(notes, /on land; moved to the nearest navigable routing cell/);
+  await page.click("#pr-submit");
+  await planned(page);
+  assert.deepEqual(planBodies(calls), [{ origin: { lat: -60.25, lon: -61.5 }, destination: { lat: -61, lon: -60.2 }, issue: "2023-11-14" }]);
+  await page.close();
+});
+
+test("a point outside the routing grid is refused with the server's reason, never planned", { skip }, async () => {
+  const { page, planCalls } = await openDashboard(browser, { datesFor: (q) => (q.get("origin_lat") ?
+    { status: 422, body: { detail: { status: "invalid_location", reason: "-40.0000, -60.0000 (-40.0, -60.0) is outside the routing grid" } } } :
+    { body: datesPayload }) });
+  await ready(page);
+  await page.selectOption("#pr-origin", "__map__");
+  await page.fill("#pr-origin-lat", "-40");
+  await page.fill("#pr-origin-lon", "-60");
+  await page.dispatchEvent("#pr-origin-lon", "change");
+  await page.waitForFunction(() => /outside the routing grid/.test(document.querySelector("#pr-notes").innerText));
+  assert.match(await text(page, "#pr-notes"), /cannot be routed[\s\S]*outside the routing grid/);
+  assert.ok(await page.isDisabled("#pr-submit"));
+  assert.equal(planCalls().length, 0);
+  assert.equal(await page.evaluate(() => kmToLatLon(prod.locations.map, 1e5, 0)), null);   // clicks off the grid are ignored
+  await page.close();
+});
+
+/* ------------------------------------------------------------- forecast mode (dates after the archive) */
+const FC_DISCLOSURE = "Forecast estimate: stand-in disclosure for dates after the archive.";
+const FC_DATES = ["2026-11-14", "2026-11-15", "2026-11-19"];
+const fcDates = { ...datesPayload, forecast: { mode: "forecast", label: "Forecast / hackathon estimate", disclosure: FC_DISCLOSURE,
+  banners: ["FORECAST / HACKATHON ESTIMATE", "Proxy sea ice and forcing from an analogue season", "Research estimate, not certified navigation"],
+  dates: FC_DATES, first: FC_DATES[0], last: FC_DATES.at(-1), available: true, reason: null } };
+
+function makeForecastPlan() {
+  const p = makePlan();
+  const files = (f) => [{ file: f, sha256: "ab".repeat(32), first: "2024-11-01", last: "2025-02-28" }];
+  p.metadata = { mode: "forecast", label: "Forecast / hackathon estimate", execution_mode: "modelled", data_status: "forecast_estimate",
+    issue_date: "2026-11-19", requested_date: "2026-11-19", hindsight_forcing: false, proxy_forcing: true,
+    forecast_disclosure: FC_DISCLOSURE, banners: fcDates.forecast.banners, disclaimer: "Stand-in disclaimer.", window_days: 14,
+    horizon_days: 6, scenario_days: 20, n_scenarios: 200, layer_source: ["proxy_analogue_observed", "forecast"],
+    forecast: { forecast_mode: true, requested_date: "2026-11-19", archive_last_date: "2025-02-28",
+      observations_for_requested_dates: "none: stand-in",
+      date_mapping: { analogue_start_date: "2024-11-19", analogue_season: "2024-25", offset_days: 730,
+        engine_days: ["2024-11-19", "2024-12-08"], shown_as: ["2026-11-19", "2026-12-08"] },
+      sea_ice: { status: "proxy_analogue", observed_window_used: ["2024-11-06", "2024-11-19"], source: "OSI SAF stand-in",
+        file: "sea_ice_stand_in.nc", sha256: "cd".repeat(32) },
+      sea_ice_forecast: { status: "forecast", model: { id: "unet_stand_in", sha256: "ef".repeat(32), lead_days: 21 } },
+      forcing: { status: "proxy_analogue_reanalysis", winds: { product: "ERA5 daily reanalysis", dates_used: ["2024-11-19", "2024-12-08"],
+        files: files("winds.nc") }, currents: { product: "CMEMS GLOBAL reanalysis daily", dates_used: ["2024-11-19", "2024-12-08"],
+        files: files("currents.nc") } },
+      icebergs: { status: "observed_snapshot_held", source: "USNIC stand-in", snapshot_date: "2026-10-01", file: "AntarcticIcebergs_20261001.csv",
+        sha256: "12".repeat(32), age_days_at_requested_date: 49, max_age_days: 120, n_source_bergs: 33, n_in_grid: 1, ids_in_grid: ["T1"],
+        drift_model: { model: "calibrated ensemble drift", beta: 0.1, alpha_scale: 0.1, spread_factor: 0.6053, members: 200 } },
+      limitations: ["Research / decision-support prototype; not certified for navigation.",
+        "The iceberg snapshot may be up to 120 days old; its actual age is shown in the result."],
+      engine_provenance: { limitations: ["Iceberg positions come from the latest weekly USNIC list (up to 14 days old)."] } } };
+  p.daily[0].layer_source = "proxy_analogue_observed";
+  p.layers.layers[0].source = "proxy_analogue_observed";
+  return p;
+}
+
+test("a future date is offered as a labelled forecast estimate and planned through the same call", { skip }, async () => {
+  const bodies = [];
+  const { page, errors } = await openDashboard(browser, { dates: fcDates,
+    plan: (b) => { bodies.push(b); return { status: 200, body: makeForecastPlan() }; } });
+  await ready(page);
+  // 2026-11-19 is in the server's forecast range, so it is the default demonstration date.
+  assert.equal(await page.inputValue("#pr-issue"), "2026-11-19");
+  assert.match(await text(page, "#pr-mode"), /FORECAST \/ HACKATHON ESTIMATE[\s\S]*proxy/);
+  // No season list in the product: the date is the only control; the examples come from the server's lists.
+  assert.equal(await page.locator("#pr-season").count(), 0);
+  assert.equal(await page.getAttribute("#pr-issue", "max"), "2026-11-19");
+  assert.match(await text(page, "#pr-examples"), /Try: 19 Nov 2026 \(forecast\) · 14 Nov 2023 \(historical\)/);
+  await page.click('#pr-examples [data-date="2023-11-14"]');
+  assert.equal(await page.inputValue("#pr-issue"), "2023-11-14");
+  assert.match(await text(page, "#pr-mode"), /REAL HISTORICAL DATA/);
+  await page.fill("#pr-issue", "2026-11-19");
+  await page.dispatchEvent("#pr-issue", "change");
+  assert.match(await text(page, "#pr-mode"), /FORECAST \/ HACKATHON ESTIMATE[\s\S]*proxy/);
+  assert.match(await text(page, "#mode-badge"), /FORECAST \/ HACKATHON ESTIMATE/);
+  await page.click("#pr-submit");
+  await planned(page);
+  assert.equal(bodies.length, 1);
+  assert.equal(bodies[0].issue, "2026-11-19");
+  assert.equal(await text(page, "#pr-disclosure"), FC_DISCLOSURE);
+  assert.match(await text(page, "#pr-banners"), /FORECAST \/ HACKATHON ESTIMATE/);
+  assert.ok(!(await text(page, "#pr-banners")).includes("HISTORICAL MODE"));
+  assert.match(await text(page, "#pr-verdict"), /forecast estimate/i);
+  const how = await text(page, "#pr-howto");
+  assert.match(how, /How this estimate was generated/);
+  assert.match(how, /Sea ice historical analogue start[\s\S]*U-Net/);
+  assert.match(how, /Wind ERA5 daily reanalysis[\s\S]*not a 2026 forecast/);
+  assert.match(how, /Currents CMEMS GLOBAL reanalysis daily[\s\S]*not a 2026 forecast/);
+  assert.match(how, /Icebergs latest available official USNIC list \(2026-10-01[\s\S]*calibrated drift/);
+  assert.match(how, /Result hackathon research estimate, not certified navigation/);
+  assert.match(await text(page, '[data-risk="combined"]'), /0 of 200|of 200 scenarios/);
+  const data = await page.locator("#pr-data-modes").innerText();
+  assert.match(data, /Sea ice \(proxy\)[\s\S]*2024-11-06[\s\S]*NOT observations of[\s\S]*2026/);
+  assert.match(data, /Winds & currents \(proxy\)[\s\S]*not a forecast/);
+  assert.match(data, /list of 2026-10-01 \(49 d before/);
+  // Each input says what it is; proxy forcing is never called a forecast.
+  assert.match(await text(page, "#pr-data-kinds"), /Real observation[\s\S]*Hindsight reanalysis[\s\S]*Proxy \/ analogue[\s\S]*Model output[\s\S]*Derived estimate/);
+  const sources = await text(page, "#pr-data-sources");
+  assert.match(sources, /Proxy \/ analogue\s*ERA5 winds[^.]*proxy, not a forecast/);
+  assert.match(sources, /Proxy \/ analogue\s*Copernicus Marine \(CMEMS\) currents[^.]*proxy, not a forecast/);
+  assert.match(sources, /Model output\s*Residual U-Net sea-ice forecast/);
+  assert.match(await text(page, "#pr-data-method"), /Calibration[\s\S]*residual bank[\s\S]*calibrated on hindcasts/);
+  // The forecast's own limitations: the 120-day snapshot rule, not the historical 14-day line.
+  const limits = await page.locator("#pr-data-limits").textContent();
+  assert.match(limits, /may be up to 120 days old; its actual age is shown in the result/);
+  assert.doesNotMatch(limits, /up to 14 days old/);
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+test("a date outside both the archive and the forecast range is refused with a reason", { skip }, async () => {
+  const { page, planCalls } = await openDashboard(browser, { dates: fcDates });
+  await ready(page);
+  await page.fill("#pr-issue", "2026-12-25");
+  await page.dispatchEvent("#pr-issue", "change");
+  assert.match(await text(page, "#pr-notes"), /2026-12-25 is outside the forecast-estimate range for this route \(2026-11-14 to 2026-11-19\)/);
+  assert.ok(await page.locator("#pr-submit").isDisabled());
+  assert.equal(planCalls().length, 0);
+  await page.close();
+});
+
+test("a chosen future date is never overwritten by a route change or the season list", { skip }, async () => {
+  const { page, calls } = await openDashboard(browser, { dates: fcDates });
+  await ready(page);
+  await page.fill("#pr-issue", "2026-11-15");
+  await page.dispatchEvent("#pr-issue", "change");
+  await page.selectOption("#pr-destination", "charlie");
+  await ready(page);
+  assert.equal(datesQueries(calls).at(-1), "?origin=alpha&destination=charlie");
+  assert.equal(await page.inputValue("#pr-issue"), "2026-11-15");
+  await page.click("#pr-swap");
+  await ready(page);
+  assert.equal(await page.inputValue("#pr-issue"), "2026-11-15");
+  assert.match(await text(page, "#pr-mode"), /FORECAST \/ HACKATHON ESTIMATE/);
+  await page.close();
+});
+
+test("without 2026-11-19 in the forecast range the default stays the historical demo date", { skip }, async () => {
+  const fc = { ...fcDates, forecast: { ...fcDates.forecast, dates: ["2026-11-14"], first: "2026-11-14", last: "2026-11-14" } };
+  const { page } = await openDashboard(browser, { dates: fc });
+  await ready(page);
+  assert.equal(await page.inputValue("#pr-issue"), "2023-11-14");
+  assert.match(await text(page, "#pr-mode"), /REAL HISTORICAL DATA/);
+  await page.close();
+});
+
+for (const [day, expect] of [
+  ["2025-11-14", /2025-11-14 is outside the forecast-estimate range for this route \(2026-11-14 to 2026-11-19\)/],
+  ["2026-11-17", /2026-11-17 is outside the forecast-estimate range/],
+  ["2026-06-01", /2026-06-01 is outside the Nov–Feb sea-ice season, so there is no forecast estimate[\s\S]*2026-11-14 to 2026-11-19/],
+]) {
+  test(`an unsupported future date is explained, not replaced or planned: ${day}`, { skip }, async () => {
+    const { page, planCalls } = await openDashboard(browser, { dates: fcDates });
+    await ready(page);
+    await page.fill("#pr-issue", day);
+    await page.dispatchEvent("#pr-issue", "change");
+    assert.match(await text(page, "#pr-notes"), expect);
+    assert.equal(await page.inputValue("#pr-issue"), day);
+    assert.ok(await page.isDisabled("#pr-submit"));
+    assert.equal(planCalls().length, 0);
+    await page.close();
+  });
+}
+
+test("a forecast_unavailable refusal from the server is shown in words", { skip }, async () => {
+  const { page } = await openDashboard(browser, { dates: fcDates, plan: () => ({ status: 422,
+    body: { detail: { status: "forecast_unavailable", reason: "no official USNIC iceberg list within 120 days" } } }) });
+  await ready(page);
+  await page.click("#pr-submit");
+  await page.waitForSelector("#pr-error:not([hidden])");
+  assert.match(await text(page, "#pr-error"), /No forecast estimate for this date[\s\S]*no official USNIC iceberg list within 120 days/);
+  assert.ok(!(await page.locator("#pr-result").isVisible()));
+  await page.close();
+});
+
+test("typed coordinates out of range are explained and never sent", { skip }, async () => {
+  const { page, calls } = await openDashboard(browser, { datesFor: datesForPoints() });
+  await ready(page);
+  const before = datesQueries(calls).length;
+  await page.selectOption("#pr-origin", "__map__");
+  await page.fill("#pr-origin-lat", "-95");
+  await page.fill("#pr-origin-lon", "-60");
+  await page.dispatchEvent("#pr-origin-lon", "change");
+  assert.match(await text(page, "#pr-notes"), /Start: -95\.000°, -60\.000° is not a valid position/);
+  assert.ok(await page.isDisabled("#pr-submit"));
+  assert.ok(!datesQueries(calls).slice(before).some((q) => q.includes("origin_lat=-95")));
+  await page.close();
+});
+
+test("the progress strip follows the page and the plan, and is not a second navigation", { skip }, async () => {
+  const { page } = await openDashboard(browser);
+  await ready(page);
+  const state = () => page.$$eval("#pr-flow li", (ls) => ls.map((l) => `${l.dataset.step}:${l.className}`));
+  assert.deepEqual(await state(), ["plan:current", "result:", "sim:", "data:"]);
+  assert.equal(await page.locator("#pr-flow button, #pr-flow a").count(), 0);
+  await page.click("#pr-submit");
+  await planned(page);
+  assert.deepEqual(await state(), ["plan:done", "result:current", "sim:", "data:"]);
+  await page.click('.primary-nav button[data-view="data"]');
+  assert.deepEqual(await state(), ["plan:done", "result:done", "sim:", "data:current"]);
+  await page.click('.primary-nav button[data-view="sim"]');
+  await page.waitForSelector("#sim-body:not([hidden])");
+  assert.deepEqual(await state(), ["plan:done", "result:done", "sim:current", "data:"]);
+  await page.close();
+});
+
+test("the Research / Developer banner uses the agreed wording", { skip }, async () => {
+  const { page } = await openDashboard(browser);
+  await ready(page);
+  await page.click("#dev-area summary");
+  await page.click('.dev-tabs button[data-tab="validation"]');
+  assert.match(await text(page, "#dev-banner"), /Research \/ Developer view — not part of the main hackathon product\.[\s\S]*← Back to Plan Route/);
   await page.close();
 });
 
@@ -758,9 +1100,9 @@ test("real smoke: a 2024-25 issue date plans and simulates through the normal fl
   await page.selectOption("#pr-origin", "drake_passage");
   await page.selectOption("#pr-destination", "bransfield_strait");
   await ready(page);
-  assert.ok((await page.locator("#pr-season option").allInnerTexts()).includes("2024-25 (88 dates, independent evaluation)"));
-  await page.selectOption("#pr-season", "2024-25");
-  assert.equal(await page.inputValue("#pr-issue"), "2024-11-14");
+  await page.fill("#pr-issue", "2024-11-14");
+  await page.dispatchEvent("#pr-issue", "change");
+  assert.match(await text(page, "#pr-mode"), /REAL HISTORICAL DATA/);
   await page.click("#pr-submit");
   await page.waitForSelector("#pr-result:not([hidden])", { timeout: 220000 });
   assert.match(await text(page, "#pr-verdict-badge"), /Recommended/);
@@ -770,5 +1112,32 @@ test("real smoke: a 2024-25 issue date plans and simulates through the normal fl
   assert.match(await text(page, "#sim-slider-out"), /2024-11-14 \(0 of 2\)/);
   assert.match(await text(page, "#sim-subtitle"), /No replan was required during this voyage\./);
   assert.match(await text(page, "#sim-banners"), /HISTORICAL MODE[\s\S]*hindsight[\s\S]*not certified navigation/i);
+  await page.close();
+});
+
+test("real smoke: a future date (2026-11-19) plans and simulates as a labelled forecast estimate", {
+  skip: skip || (SMOKE ? false : "set ANTROUTE_SMOKE_URL to run against a live API with the real archive"), timeout: 480000,
+}, async () => {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  await page.goto(SMOKE);
+  await ready(page);
+  await page.selectOption("#pr-origin", "drake_passage");
+  await page.selectOption("#pr-destination", "bransfield_strait");
+  await ready(page);
+  await page.fill("#pr-issue", "2026-11-19");
+  await page.dispatchEvent("#pr-issue", "change");
+  assert.match(await text(page, "#pr-mode"), /FORECAST \/ HACKATHON ESTIMATE/);
+  await page.click("#pr-submit");
+  await page.waitForSelector("#pr-result:not([hidden])", { timeout: 220000 });
+  assert.match(await text(page, "#pr-verdict-badge"), /Recommended/);
+  const metrics = await text(page, "#pr-metrics");
+  for (const s of ["19 Nov 2026, 00:00 UTC", "20 Nov 2026, 13:09 UTC", "37.1 h", "838 km"]) assert.ok(metrics.includes(s), s);
+  assert.match(await text(page, "#pr-disclosure"), /^Forecast estimate: future-year Antarctic/);
+  assert.match(await text(page, "#pr-banners"), /FORECAST \/ HACKATHON ESTIMATE/);
+  await page.click("#pr-simulate");
+  await page.waitForSelector("#sim-body:not([hidden])", { timeout: 220000 });
+  assert.match(await text(page, "#sim-slider-out"), /2026-11-19 \(0 of 2\)/);
+  assert.match(await text(page, "#sim-banners"), /FORECAST \/ HACKATHON ESTIMATE/);
+  assert.ok(!(await text(page, "#sim-banners")).includes("HISTORICAL MODE"));
   await page.close();
 });

@@ -279,8 +279,11 @@ class HistoricalArchive:
     def days(self) -> list[date]:
         return self._days
 
-    def problems(self, issue: date, n_days: int) -> list[str]:
-        """Why ``issue`` cannot be used for ``n_days`` scenario days (empty when it can)."""
+    def problems(self, issue: date, n_days: int, require_usnic: bool = True) -> list[str]:
+        """Why ``issue`` cannot be used for ``n_days`` scenario days (empty when it can).
+
+        ``require_usnic=False`` leaves out the iceberg-list rule, for forecast mode, which brings its own
+        iceberg snapshot (:mod:`antarctic_routing.forecast_mode`)."""
         days, months, L = self.days, self.season_months, self.history_days
         out = []
         if issue not in self._index:
@@ -298,10 +301,11 @@ class HistoricalArchive:
             if miss:
                 out.append(f"daily {f.product} {f.kind} are missing for {len(miss)} of the {n_days} days "
                            f"({miss[0]} .. {miss[-1]})")
-        try:
-            self.usnic.list_for(issue, self.params["usnic_max_age_days"])
-        except OutOfCoverage as exc:
-            out.append(str(exc))
+        if require_usnic:
+            try:
+                self.usnic.list_for(issue, self.params["usnic_max_age_days"])
+            except OutOfCoverage as exc:
+                out.append(str(exc))
         return out
 
     def check(self, issue: date, n_days: int) -> None:

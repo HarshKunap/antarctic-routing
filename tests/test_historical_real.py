@@ -308,3 +308,100 @@ def test_2024_25_plan_and_simulation_are_deterministic(client):
     assert u["sailed"]["distance_km"] == pytest.approx(837.75, abs=0.01) and u["sailed"]["observed_breach_cells"] == 0
     assert s["frames"][1]["observed"]["icebergs"]["file"].startswith("AntarcticIcebergs_2024")
     assert _simulate(client, {**body, "departure": "2024-11-14"}) == s
+
+
+# ------------------------------------------------------------------ forecast mode (dates after the archive)
+FC = {"origin": {"preset": "drake_passage"}, "destination": {"preset": "bransfield_strait"}, "issue": "2026-11-19"}
+
+
+def _no_observation_claims(obj, path=""):
+    """No 'observed'/'observation' field carries a date after the archive, except the official iceberg list and
+    values explicitly labelled as the analogue proxy."""
+    if isinstance(obj, dict):
+        if obj.get("source") == "proxy_analogue_observed":
+            return
+        for k, v in obj.items():
+            _no_observation_claims(v, f"{path}/{k}")
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            _no_observation_claims(v, f"{path}/{i}")
+    elif isinstance(obj, str):
+        assert obj != "observed", path
+        if "observ" in path.lower() and "/icebergs" not in path and "observations_for_requested_dates" not in path:
+            assert not any(y in obj for y in ("2025-", "2026-", "2027-")), (path, obj)
+
+
+def test_2026_11_19_is_planned_in_forecast_mode_from_labelled_proxies(client):
+    r = client.post("/real/plan", json=FC)
+    assert r.status_code == 200, r.text
+    j = r.json()
+    m, f = j["metadata"], j["metadata"]["forecast"]
+    assert (m["mode"], m["execution_mode"], m["data_status"]) == ("forecast", "modelled", "forecast_estimate")
+    assert m["banners"][0] == "FORECAST / HACKATHON ESTIMATE" and m["hindsight_forcing"] is False
+    assert m["requested_date"] == "2026-11-19" and "provenance" not in m
+    assert m["forecast_disclosure"] == SPEC["forecast_mode"]["disclosure"]
+    rt = j["route"]
+    assert j["status"] == "recommended" and j["departure"]["recommended"] == "2026-11-19" == rt["departure_date"]
+    assert rt["eta_utc"] == "2026-11-20T13:09Z" and rt["expected_hours"] == pytest.approx(37.1449, abs=1e-3)
+    assert rt["distance_km"] == pytest.approx(837.75, abs=0.01)
+    risk = j["risk"]
+    assert risk["combined"]["breaches"] == 0 and risk["combined"]["n_scenarios"] == 200
+    assert risk["combined"]["p_breach_upper"] == pytest.approx(0.018845326377266575)
+    assert [o["departure"] for o in j["departure"]["options"]][:2] == ["2026-11-19", "2026-11-20"]
+    assert len(j["departure"]["options"]) == 14 and [d["date"] for d in j["daily"]] == ["2026-11-19", "2026-11-20"]
+    # the actual data and proxy dates
+    dm = f["date_mapping"]
+    assert (dm["analogue_start_date"], dm["analogue_season"], dm["offset_days"]) == ("2024-11-19", "2024-25", 730)
+    assert dm["engine_days"] == ["2024-11-19", "2024-12-08"] and dm["shown_as"] == ["2026-11-19", "2026-12-08"]
+    assert f["sea_ice"]["status"] == "proxy_analogue" and f["sea_ice"]["observed_window_used"] == \
+        ["2024-11-06", "2024-11-19"]
+    assert f["sea_ice"]["sha256"] == SPEC["inputs"]["sea_ice_additional"][0]["sha256"]
+    assert f["sea_ice_forecast"]["model"]["sha256"] == SPEC["inputs"]["checkpoint"]["sha256"]
+    assert f["forcing"]["status"] == "proxy_analogue_reanalysis"
+    assert f["forcing"]["winds"]["dates_used"] == f["forcing"]["currents"]["dates_used"] == \
+        ["2024-11-19", "2024-12-08"]
+    b = f["icebergs"]
+    assert (b["snapshot_date"], b["file"], b["age_days_at_requested_date"]) == \
+        ("2026-10-01", "AntarcticIcebergs_20261001.csv", 49)
+    assert b["sha256"] == SPEC["inputs"]["forecast_icebergs"][-1]["sha256"]
+    assert (b["n_source_bergs"], b["n_in_grid"]) == (33, 7) and b["drift_model"]["members"] == 200
+    assert (b["drift_model"]["beta"], b["drift_model"]["alpha_scale"], b["drift_model"]["spread_factor"]) == \
+        (0.1, 0.1, 0.6053)
+    assert j["icebergs"]["list_date"] == "2026-10-01"
+    _no_observation_claims(j)
+    # deterministic plan and departure window
+    assert client.post("/real/plan", json=FC).content == r.content
+    # the engine is the unchanged historical one: same sea-ice risk as the analogue day in historical mode
+    hist = client.post("/real/plan", json={**FC, "issue": "2024-11-19"}).json()
+    assert hist["metadata"]["mode"] == "historical" and hist["risk"]["sea_ice"] == risk["sea_ice"]
+
+
+def test_forecast_dates_are_listed_after_the_archive_and_unsupported_ones_refused(client):
+    d = client.get("/real/historical/dates?origin=drake_passage&destination=bransfield_strait").json()
+    f = d["forecast"]
+    assert (f["first"], f["last"], len(f["dates"])) == ("2026-11-14", "2027-01-29", 77)
+    assert d["window_dates"][-1] == "2025-02-09"                                     # historical range unchanged
+    for issue, status, why in (("2026-06-15", "out_of_coverage", "not in the sea-ice archive"),     # off season
+                               ("2027-11-20", "forecast_unavailable", "no recent official iceberg"),
+                               ("2026-11-13", "forecast_unavailable", "no archive season can start")):
+        r = client.post("/real/plan", json={**FC, "issue": issue})
+        assert r.status_code == 422 and r.json()["detail"]["status"] == status, issue
+        assert why in r.json()["detail"]["reason"], issue
+
+
+def test_forecast_simulation_sails_the_proxy_and_is_deterministic(client):
+    s = _simulate(client, FC)
+    m = s["metadata"]
+    assert s["status"] == "simulated" and m["mode"] == "forecast" and m["execution_mode"] == "modelled"
+    assert m["departure_date"] == "2026-11-19" and "analogue" in m["simulation_note"]
+    assert [f["date"] for f in s["frames"]] == ["2026-11-19", "2026-11-20", "2026-11-20"]
+    assert [f["phase"] for f in s["frames"]] == ["departure", "at_sea", "arrived"]
+    assert all(f["observed"]["sea_ice_source"] == "proxy_analogue_observed" for f in s["frames"])
+    assert s["frames"][1]["observed"]["icebergs"]["list_date"] == "2026-10-01"
+    seg = s["frames"][1]["observed"]["sea_ice_on_segment"]
+    assert (seg["date"], seg["analogue_date"], seg["source"]) == ("2026-11-19", "2024-11-19", "proxy_analogue_observed")
+    u = s["summary"]
+    assert u["arrived"] and u["replans"] == 0 and u["arrival_utc"] == "2026-11-20T14:08Z"
+    assert u["sailed"]["distance_km"] == pytest.approx(837.75, abs=0.01) and "forecast_mode" in u["notes"]
+    _no_observation_claims(s)
+    assert _simulate(client, FC) == s

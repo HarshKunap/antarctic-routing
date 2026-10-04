@@ -84,3 +84,7 @@ POST /real/simulate[?wait=true]
 - **Positions are 25 km route cells.** Each day the vessel stops at the last cell it reaches and waits there until the next forecast, as the replay does. `summary.held_hours` reports that wait; the replay score re-sails the track continuously.
 - **Hindsight forcing.** Winds and currents for the days after each issue date are reanalysis.
 - **Research estimate, not certified navigation.**
+
+## Dates after the archive (forecast mode)
+
+A date after the real archive is simulated the same way on the analogue days of [forecast mode](FORECAST_MODE.md): the sea ice sailed through is the analogue season's real observation, labelled `proxy_analogue_observed` (each day's `sea_ice_on_segment` carries its `analogue_date`), icebergs come from the latest official USNIC list held at their last positions, and dates are shown on the requested timeline. `metadata.mode` is `forecast` and `summary.notes.forecast_mode` says so.

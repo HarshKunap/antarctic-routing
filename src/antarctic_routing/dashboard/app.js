@@ -50,10 +50,19 @@ function fitCanvas(canvas) {
 
 /* ------------------------------------------------------- data status */
 const STATUS_TEXT = { real: "Real", historical: "Historical", forecast: "Forecast", schematic: "Schematic",
-  unavailable: "Unavailable" };
+  proxy: "Proxy", unavailable: "Unavailable" };
 function statusBadge(status) {
   const s = STATUS_TEXT[status] ? status : "unavailable";
   return el("span", { class: "badge status-" + s }, STATUS_TEXT[s]);
+}
+// Data & Confidence names what each input is, not just where it came from.
+const KIND = { observation: ["real", "Real observation"], reanalysis: ["historical", "Hindsight reanalysis"],
+  proxy: ["proxy", "Proxy / analogue"], model: ["forecast", "Model output"], derived: ["derived", "Derived estimate"],
+  historicalMode: ["historical", "Historical"], forecastMode: ["forecast", "Forecast estimate"],
+  research: ["schematic", "Research use"] };
+function kindBadge(kind) {
+  const [cls, text] = KIND[kind] || KIND.derived;
+  return el("span", { class: "badge status-" + cls }, text);
 }
 const currentTab = () => document.querySelector('.tabs button[aria-selected="true"]').dataset.tab;
 
@@ -63,8 +72,10 @@ function setModeBadge(tab) {
   if (!st) { status = "unavailable"; text = "DATA STATUS UNKNOWN"; }
   else if (tab === "product") {
     const ok = st.historical && st.historical.status === "available";
-    status = ok ? "historical" : "unavailable";
-    text = ok ? "REAL HISTORICAL DATA · HINDSIGHT FORCING" : "REAL HISTORICAL DATA UNAVAILABLE";
+    const fc = ok && typeof prodForecastShown === "function" && prodForecastShown();
+    status = !ok ? "unavailable" : fc ? "forecast" : "historical";
+    text = !ok ? "REAL HISTORICAL DATA UNAVAILABLE" : fc ? "FORECAST / HACKATHON ESTIMATE · PROXY INPUTS"
+      : "REAL HISTORICAL DATA · HINDSIGHT FORCING";
   } else if (tab === "real") {
     const ok = st.real_data.status === "available";
     status = ok ? "historical" : "unavailable";
@@ -85,18 +96,26 @@ function setModeBadge(tab) {
 /* ------------------------------------------------------------- tabs */
 const HIST_TABS = ["hroute", "hwindow", "hvoyage"];
 const isHist = (tab) => HIST_TABS.includes(tab);
-document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("click", () => {
+// The primary nav holds the three product pages (all data-tab="product", one data-view each); the research
+// and synthetic views sit in the collapsed "Research / Developer" area and never in the primary nav.
+function openTab(b) {
+  const tab = b.dataset.tab;
   document.querySelectorAll(".tabs button").forEach((x) => x.setAttribute("aria-selected", String(x === b)));
-  document.querySelectorAll(".tab").forEach((s) => { s.hidden = s.id !== "tab-" + b.dataset.tab; });
-  if (b.dataset.tab === "validation") loadFigures();
-  if (b.dataset.tab === "real") redrawReal();
-  if (b.dataset.tab === "product") { drawProduct(); drawSimMap(); }
-  if (b.dataset.tab !== "product") simPause();
-  if (b.dataset.tab === "plan" && mapState.plan) drawMap(mapState.plan);
-  if (b.dataset.tab === "window" && winState.result) drawWindow(winState.result, budget());
-  if (isHist(b.dataset.tab)) redrawHist(b.dataset.tab);
-  setModeBadge(b.dataset.tab);
-}));
+  document.querySelectorAll(".tab").forEach((s) => { s.hidden = s.id !== "tab-" + tab; });
+  $("#dev-banner").hidden = tab === "product";
+  if (tab === "validation") loadFigures();
+  if (tab === "real") redrawReal();
+  if (tab !== "product") simPause();
+  if (tab === "plan" && mapState.plan) drawMap(mapState.plan);
+  if (tab === "window" && winState.result) drawWindow(winState.result, budget());
+  if (isHist(tab)) redrawHist(tab);
+  if (tab === "product") { if (b.dataset.view === "sim") openSimulation(); else setView(b.dataset.view); }
+  setModeBadge(tab);
+}
+const primaryButton = (view) => $(`.primary-nav button[data-view="${view}"]`);
+document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("click", () => openTab(b)));
+$("#dev-back").addEventListener("click", () => openTab(primaryButton("plan")));
+document.querySelectorAll("[data-goto]").forEach((b) => b.addEventListener("click", () => openTab(primaryButton(b.dataset.goto))));
 const budget = () => (window.__config ? window.__config.routing.risk_budget : 0.05);
 
 /* ------------------------------------------------------------- map */
@@ -120,6 +139,10 @@ function drawMap(plan, canvasSel = "#map", st = mapState, legendSel = "#map-lege
   const f0 = pad + scale * maxy + ((h - 2 * pad) - scale * (maxy - miny)) / 2;
   const toScreen = (x, y) => { const [rx, ry] = rot(x, y); return [e0 + scale * rx, f0 - scale * ry]; };
   st.toScreen = toScreen;
+  st.fromScreen = (px, py) => {           // screen pixel -> grid km (inverse of toScreen)
+    const rx = (px - e0) / scale, ry = (f0 - py) / scale;
+    return [rx * c + ry * s, -rx * s + ry * c];
+  };
 
   ctx.fillStyle = css("--surface-1");
   ctx.fillRect(0, 0, w, h);
@@ -972,6 +995,7 @@ function redrawHist(tab) {
 // The page draws what /real/plan returns and nothing else: no risk, route or forecast is computed here, and no
 // synthetic data is ever shown in place of a missing or failed result.
 const prod = { locations: null, dates: null, datesKey: null, result: null, day: 0, view: "plan", busy: false,
+  picking: null, picked: { origin: null, destination: null }, datesError: null, dateChosen: false,
   controller: null, timer: null, lastBody: null };
 const prMapState = { plan: null, toScreen: null, screenRoutes: [], tracks: null, k: 0 };
 const prWinState = { result: null, bars: [] };
@@ -1008,12 +1032,16 @@ function describeFailure(status, body) {
   const d = body && typeof body === "object" ? body.detail : null;
   const reason = d && typeof d === "object" && !Array.isArray(d) ? d.reason : typeof d === "string" ? d : "";
   if (status === 422 && d && d.status === "invalid_location") {
-    return new PlanError("This origin or destination cannot be routed", reason,
-      "Pick another preset. Locations must be on the 25 km routing grid and within reach of open water.");
+    return new PlanError("This start or destination cannot be routed", reason,
+      "Pick another location or point. Points must be inside the routing area and within reach of open water.");
   }
   if (status === 422 && d && d.status === "out_of_coverage") {
     return new PlanError("The archive does not cover this date for this route", reason,
       "Pick another date from the supported range shown under the form. Longer routes need more covered days.");
+  }
+  if (status === 422 && d && d.status === "forecast_unavailable") {
+    return new PlanError("No forecast estimate for this date", reason,
+      "Forecast estimates exist only for the in-season future dates listed under the form. Nothing synthetic is shown.");
   }
   if (status === 422 && Array.isArray(d)) {
     return new PlanError("The request was not accepted", d.map((e) => `${(e.loc || []).slice(1).join(".")}: ${e.msg}`)
@@ -1055,7 +1083,7 @@ function checkPlan(p) {
   if (!p || typeof p !== "object") throw bad("not an object");
   if (!PLAN_STATUSES.includes(p.status)) throw bad(`unknown status "${p.status}"`);
   const m = p.metadata;
-  if (!m || m.mode !== "historical" || m.execution_mode !== "real") throw bad("not labelled as real historical data");
+  if (!labelledMode(m)) throw bad("not labelled as real historical data or as a forecast estimate");
   if (!p.locations || !p.locations.origin || !p.locations.destination) throw bad("locations missing");
   if (!p.departure || !Array.isArray(p.departure.options)) throw bad("departure options missing");
   if (p.status !== "no_route") {
@@ -1067,86 +1095,222 @@ function checkPlan(p) {
   return p;
 }
 
+// Two labelled modes: real historical data, or a forecast estimate for dates after the archive (proxy inputs).
+function labelledMode(m) {
+  if (!m) return false;
+  if (m.mode === "historical") return m.execution_mode === "real";
+  return m.mode === "forecast" && m.execution_mode === "modelled" && Boolean(m.forecast && m.forecast.forecast_mode);
+}
+
+function srcLabel(src) {
+  return src === "proxy_analogue_observed" ? "proxy: analogue-season observation" : (src || "–");
+}
+
+function obsWord(src) {
+  return src === "proxy_analogue_observed" ? "proxy sea ice (analogue-season observation)" : "observed sea ice";
+}
+
 /* ---- form */
 function presetById(id) { return (prod.locations?.presets || []).find((p) => p.id === id) || null; }
 
+const MAP_VALUE = "__map__";            // the "point on the map" choice in the origin/destination lists
+const ROLE_LABEL = { origin: "Start", destination: "Destination" };
+
+// What the form sends for one end: {preset} or a {lat, lon} point; null while a point is incomplete.
+function endOf(role) {
+  const v = $(`#pr-${role}`).value;
+  if (v !== MAP_VALUE) return v ? { preset: v } : null;
+  const lat = parseFloat($(`#pr-${role}-lat`).value), lon = parseFloat($(`#pr-${role}-lon`).value);
+  return Number.isFinite(lat) && Number.isFinite(lon) ? { lat, lon } : null;
+}
+// A typed point outside the valid latitude/longitude range is explained here and never sent.
+function coordProblem(role) {
+  if ($(`#pr-${role}`).value !== MAP_VALUE) return null;
+  const e = endOf(role);
+  if (!e) return null;
+  if (e.lat < -90 || e.lat > 90 || e.lon < -180 || e.lon > 180) {
+    return `${ROLE_LABEL[role]}: ${num(e.lat, 3)}°, ${num(e.lon, 3)}° is not a valid position. Latitude must be ` +
+      "between -90 and 90 and longitude between -180 and 180.";
+  }
+  return null;
+}
+const endName = (e) => (!e ? "–" : e.preset ? (presetById(e.preset)?.name || e.preset) : `${num(e.lat, 3)}°, ${num(e.lon, 3)}°`);
+
+// The server's resolution of an end (from the dates response for the chosen ends), else the preset's.
+function resolvedEnd(role) {
+  const r = prod.dates && prod.dates.route && prod.dates.route[role];
+  if (r) return r;
+  const v = $(`#pr-${role}`).value;
+  return v === MAP_VALUE ? null : presetById(v);
+}
+
 function snapNote(role, loc) {
   if (!loc) return null;
-  const who = role === "origin" ? "Origin" : "Destination";
+  const who = ROLE_LABEL[role], point = $(`#pr-${role}`).value === MAP_VALUE;
   if (loc.available === false) return el("p", { class: "pr-note bad" }, `${who}: ${loc.reason}`);
-  if (!loc.snapped) return null;
   const r = loc.resolved || {};
-  return el("p", { class: "pr-note" }, el("b", {}, `${who} snapped ${num(loc.distance_km, 1)} km`),
-    ` to the nearest open-water grid cell: requested ${ll(loc.requested)}, routing from ${ll(r)}. ${loc.reason || ""}`);
+  if (loc.snapped) {
+    return el("p", { class: "pr-note", "data-snap": role }, el("b", {}, `${who} moved ${num(loc.distance_km, 1)} km to open water`),
+      `: requested ${ll(loc.requested)}, routing from ${ll(r)}. ${loc.reason || ""}`);
+  }
+  if (!point) return null;
+  return el("p", { class: "pr-note muted", "data-snap": role }, el("b", {}, `${who} is in open water`),
+    `: requested ${ll(loc.requested)}, routing from the cell centre ${ll(r)} (${num(loc.distance_km, 1)} km away; not moved).`);
+}
+
+function forecastInfo() {
+  const f = prod.dates && prod.dates.forecast;
+  return f && f.available && Array.isArray(f.dates) && f.dates.length ? f : null;
+}
+
+// "historical" when the real archive supports the date, "forecast" for a supported date after it, else null.
+function dateMode(day) {
+  if (!prod.dates || !day) return null;
+  if ((prod.dates.window_dates || []).includes(day)) return "historical";
+  const f = forecastInfo();
+  return f && f.dates.includes(day) ? "forecast" : null;
+}
+
+// The product shows a forecast estimate: the plan on screen is one, or (before planning) the chosen date is one.
+function prodForecastShown() {
+  try {
+    if (prod.result) return prod.result.metadata.mode === "forecast";
+    return dateMode($("#pr-issue").value) === "forecast";
+  } catch { return false; }      // called by the header badge before the product module has initialised
+}
+
+function modeNote() {
+  const mode = dateMode($("#pr-issue").value);
+  if (!mode) return null;
+  return mode === "historical" ?
+    el("p", { class: "pr-note pr-mode historical", id: "pr-mode" }, el("span", { class: "pr-mode-badge" }, "REAL HISTORICAL DATA"),
+      " Past season, real archive with hindsight forcing.") :
+    el("p", { class: "pr-note pr-mode forecast", id: "pr-mode" }, el("span", { class: "pr-mode-badge" }, "FORECAST / HACKATHON ESTIMATE"),
+      " No observations exist for this date: proxy sea ice and forcing from an analogue season, latest official icebergs.");
 }
 
 function dateNote() {
   const d = prod.dates;
   if (!d) return null;
-  const dates = d.window_dates || [];
-  if (!dates.length) return el("p", { class: "pr-note bad" }, "No supported issue dates for this route.");
-  return el("p", { class: "pr-note muted" }, `Supported issue dates for this route: ${dates.length} days between ` +
-    `${dates[0]} and ${dates[dates.length - 1]} (Nov–Feb seasons; some single days are missing upstream). ` +
+  const dates = d.window_dates || [], f = forecastInfo();
+  if (!dates.length && !f) return el("p", { class: "pr-note bad" }, "No supported dates for this route.");
+  return el("p", { class: "pr-note muted" }, (dates.length ? `Real historical dates for this route: ${dates.length} days ` +
+    `between ${dates[0]} and ${dates[dates.length - 1]} (Nov–Feb seasons; some single days are missing upstream). ` : "") +
+    (f ? `Forecast estimates: ${f.first} to ${f.last}. ` : "") +
     `Route horizon ${d.horizon_days} days, ${d.window_days_max}-day departure window.`);
+}
+
+// Why a date cannot be planned, from the server's lists only (the forecast range is forecast_mode's, not ours).
+function unsupportedDate(day) {
+  const d = prod.dates, dates = d.window_dates || [], f = forecastInfo(), fr = d.forecast || {};
+  const hist = dates.length ? ` Real historical dates: ${dates[0]} to ${dates[dates.length - 1]}.` : "";
+  const fcRange = f ? ` Forecast estimates: ${f.first} to ${f.last}.` : "";
+  if (dates.length && day <= dates[dates.length - 1]) {
+    return `No Real Historical Data for ${day} on this route (seasons run Nov–Feb, and some single days are ` +
+      `missing upstream).${hist}${fcRange}`;
+  }
+  const month = Number(day.slice(5, 7));
+  if (month >= 3 && month <= 10) {
+    return `${day} is outside the Nov–Feb sea-ice season, so there is no forecast estimate for it.${fcRange || hist}`;
+  }
+  if (f) return `${day} is outside the forecast-estimate range for this route (${f.first} to ${f.last}).${hist}`;
+  return `No forecast estimate is available for this route${fr.reason ? `: ${fr.reason}` : "."}${hist}`;
 }
 
 function formProblem() {
   const f = $("#pr-form"), o = f.origin.value, dst = f.destination.value, day = f.issue.value;
   if (!prod.locations) return "Locations are still loading.";
-  if (!o || !dst) return "Choose an origin and a destination.";
-  if (o === dst) return "Origin and destination are the same place. Choose two different locations.";
+  for (const role of ["origin", "destination"]) {
+    if ($(`#pr-${role}`).value === MAP_VALUE && !endOf(role)) {
+      return `${ROLE_LABEL[role]}: press 📍 Pick on map and click the sea, or type a latitude and longitude.`;
+    }
+  }
+  for (const role of ["origin", "destination"]) if (coordProblem(role)) return coordProblem(role);
+  if (!o || !dst) return "Choose a start and a destination.";
+  if (o === dst && o !== MAP_VALUE) return "Start and destination are the same place. Choose two different locations.";
   if (presetById(o)?.available === false || presetById(dst)?.available === false) return "This location cannot be routed.";
+  if (prod.datesError) return prod.datesError;
   if (!prod.dates) return "Supported dates are still loading.";
   if (!day) return "Choose an issue date.";
-  if (!(prod.dates.window_dates || []).includes(day)) {
-    return `No Real Historical Data for ${day} on this route. Pick a date in the supported range below.`;
-  }
+  if (!dateMode(day)) return unsupportedDate(day);
   return null;
 }
 
 function refreshForm() {
   const f = $("#pr-form"), problem = formProblem();
-  const notes = [snapNote("origin", presetById(f.origin.value)), snapNote("destination", presetById(f.destination.value)),
-    problem && prod.locations ? el("p", { class: "pr-note bad", id: "pr-form-problem" }, problem) : null, dateNote()];
+  const notes = [snapNote("origin", resolvedEnd("origin")), snapNote("destination", resolvedEnd("destination")),
+    problem && prod.locations ? el("p", { class: "pr-note bad", id: "pr-form-problem" }, problem) : null, modeNote(),
+    dateNote()];
   $("#pr-notes").replaceChildren(...notes.filter(Boolean));
   $("#pr-submit").disabled = Boolean(problem) || prod.busy;
+  if (currentTab() === "product") setModeBadge("product");
+  drawPickMap();
+  updateFlow();
+}
+
+// The default demonstration date: the 2026-11-19 forecast estimate when forecast_mode supports it on this
+// route, else the frozen 2023-11-14 replay, else the first supported date. A UI default only.
+const DEMO_FORECAST_DATE = "2026-11-19", DEMO_HISTORICAL_DATE = "2023-11-14";
+function defaultDate(dates, seasons, fc) {
+  if (fc && fc.dates.includes(DEMO_FORECAST_DATE)) return DEMO_FORECAST_DATE;
+  if (dates.includes(DEMO_HISTORICAL_DATE)) return DEMO_HISTORICAL_DATE;
+  const pick = seasons.find((s) => s.season === "2023-24") || seasons[seasons.length - 1];
+  return pick ? pick.first : dates[0] || (fc ? fc.first : null);
+}
+
+// Two one-click examples under the date, each shown only when the server lists that date for this route.
+function renderExamples() {
+  const box = $("#pr-examples"), opts = [[DEMO_FORECAST_DATE, "19 Nov 2026 (forecast)"],
+    [DEMO_HISTORICAL_DATE, "14 Nov 2023 (historical)"]].filter(([d]) => dateMode(d));
+  box.hidden = !opts.length;
+  box.replaceChildren(...(opts.length ? ["Try: ", ...opts.flatMap(([d, label], k) => [k ? " · " : "",
+    el("button", { type: "button", class: "pr-link pr-example", "data-date": d }, label)])] : []));
+  box.querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
+    $("#pr-issue").value = b.dataset.date; prod.dateChosen = true; refreshForm();
+  }));
 }
 
 async function loadProductDates() {
-  const f = $("#pr-form"), o = f.origin.value, dst = f.destination.value;
-  if (!o || !dst || o === dst) { prod.dates = null; refreshForm(); return; }
-  const key = `${o}|${dst}`;
+  const o = endOf("origin"), dst = endOf("destination");
+  prod.datesError = null;
+  if (!o || !dst || (o.preset && o.preset === dst.preset) || coordProblem("origin") || coordProblem("destination")) {
+    prod.dates = null; prod.datesKey = null; refreshForm(); return;
+  }
+  const key = JSON.stringify([o, dst]);
   if (prod.datesKey === key && prod.dates) { refreshForm(); return; }
   prod.datesKey = key;
   prod.dates = null;
   $("#pr-issue").disabled = true;
   refreshForm();
+  const q = (role, e) => (e.preset ? `${role}=${encodeURIComponent(e.preset)}` : `${role}_lat=${e.lat}&${role}_lon=${e.lon}`);
   try {
-    const d = await planFetch(`/real/historical/dates?origin=${encodeURIComponent(o)}&destination=${encodeURIComponent(dst)}`);
+    const d = await planFetch(`/real/historical/dates?${q("origin", o)}&${q("destination", dst)}`);
     if (prod.datesKey !== key) return;          // a newer selection won
     prod.dates = d;
-    const input = $("#pr-issue"), season = $("#pr-season"), dates = d.window_dates || [];
+    const input = $("#pr-issue"), dates = d.window_dates || [];
     const seasons = (d.seasons && d.seasons.window) || [];
-    season.replaceChildren(...seasons.map((s) => el("option", { value: s.season },
-      `${s.season} (${s.n_dates} dates${s.out_of_sample ? "" : ", in-sample"}` +
-      `${s.independent_evaluation ? ", independent evaluation" : ""})`)));
-    season.disabled = !seasons.length;
-    if (dates.length) {
-      input.min = dates[0]; input.max = dates[dates.length - 1];
-      if (!dates.includes(input.value)) {
-        const pick = seasons.find((s) => s.season === "2023-24") || seasons[seasons.length - 1];
-        input.value = dates.includes("2023-11-14") ? "2023-11-14" : (pick ? pick.first : dates[0]);
-      }
+    const fc = forecastInfo();
+    if (dates.length || fc) {
+      input.min = dates.length ? dates[0] : fc.first;
+      input.max = fc ? fc.last : dates[dates.length - 1];
     }
-    const cur = seasons.find((s) => s.first <= input.value && input.value <= s.last);
-    if (cur) season.value = cur.season;
-    input.disabled = !dates.length;
+    // A date the person typed or picked stays as it is (an unsupported one is explained, not replaced);
+    // until then the page shows the default demonstration date.
+    if (!prod.dateChosen || !input.value) {
+      const def = defaultDate(dates, seasons, fc);
+      if (def && (!input.value || !dateMode(input.value))) input.value = def;
+    }
+    renderExamples();
+    input.disabled = !dates.length && !fc;
   } catch (e) {
     if (prod.datesKey !== key) return;
     prod.datesKey = null;
-    $("#pr-notes").replaceChildren(el("p", { class: "pr-note bad" },
-      `Could not load the supported dates: ${e.message}`));
-    $("#pr-submit").disabled = true;
+    // A point the server cannot route (outside the grid, too far from open water) is explained, not guessed at.
+    prod.datesError = e.title && e.title.startsWith("This start or destination") ?
+      `This start or destination cannot be routed: ${e.message}` : e.title === "The request was not accepted" ?
+      "The start or destination coordinates were not accepted. Latitude must be between -90 and 90 and longitude " +
+      "between -180 and 180." : `Could not load the supported dates: ${e.message}`;
+    refreshForm();
     return;
   }
   refreshForm();
@@ -1168,16 +1332,129 @@ function fillLocationSelects(locs) {
   byRegion(o); byRegion(dst);
   const ok = usable.filter((p) => p.available !== false);
   // The API's own order: the configured origin comes first and the configured destination second.
+  for (const sel of [o, dst]) sel.append(el("option", { value: MAP_VALUE }, "📍 Point on the map…"));
   if (ok[0]) o.value = ok[0].id;
   if (ok[1]) dst.value = ok[1].id;
-  o.disabled = dst.disabled = $("#pr-swap").disabled = false;
+  o.disabled = dst.disabled = $("#pr-swap").disabled = $("#pr-pick-origin").disabled = $("#pr-pick-destination").disabled = false;
+}
+
+/* ---- Pick on map: the click becomes a WGS84 point; the server snaps it (never onto land) */
+const pickState = { plan: null, toScreen: null, fromScreen: null, screenRoutes: [] };
+
+function showCoords(role) {
+  const point = $(`#pr-${role}`).value === MAP_VALUE;
+  $(`#pr-${role}-coords`).hidden = !point;
+  if (!point && prod.picking === role) prod.picking = null;
+}
+
+function armPick(role) {
+  $(`#pr-${role}`).value = MAP_VALUE;
+  showCoords(role);
+  prod.picking = role;
+  if (prod.view !== "plan") openTab(primaryButton("plan")); else setView("plan");
+  $("#pr-pick").scrollIntoView({ block: "nearest", behavior: "smooth" });
+  refreshForm();
+}
+
+// Grid km -> WGS84, interpolated between the cell centres' positions the server sent (display only).
+function kmToLatLon(g, x, y) {
+  const fc = (x - g.x_km[0]) / g.res_km, fr = (y - g.y_km[0]) / g.res_km;
+  if (fc < -0.5 || fc > g.nx - 0.5 || fr < -0.5 || fr > g.ny - 0.5) return null;
+  const c0 = Math.max(0, Math.min(g.nx - 2, Math.floor(fc))), r0 = Math.max(0, Math.min(g.ny - 2, Math.floor(fr)));
+  const tc = fc - c0, tr = fr - r0, at = (a, r, c) => a[r * g.nx + c];
+  const bil = (a) => (1 - tr) * ((1 - tc) * at(a, r0, c0) + tc * at(a, r0, c0 + 1)) +
+    tr * ((1 - tc) * at(a, r0 + 1, c0) + tc * at(a, r0 + 1, c0 + 1));
+  return { lat: Math.round(bil(g.lat) * 1e4) / 1e4, lon: Math.round(bil(g.lon) * 1e4) / 1e4 };
+}
+
+function endXY(role) {
+  const g = prod.locations && prod.locations.map, r = resolvedEnd(role);
+  if (!g || !r || !r.resolved || r.resolved.row == null) return null;
+  return [g.x_km[r.resolved.col], g.y_km[r.resolved.row]];
+}
+
+function drawPickMap() {
+  const g = prod.locations && prod.locations.map, card = $("#pr-pick");
+  if (!g || card.closest("[hidden]") || $("#tab-product").hidden) return;
+  const plan = {
+    map: { nx: g.nx, ny: g.ny, res_km: g.res_km, x0_km: g.x0_km, y0_km: g.y0_km, rotation_rad: g.rotation_rad,
+      land: g.land, p_ice: g.land.map(() => 0), p_berg: null },
+    candidates: [], recommended_index: null,
+    origin_xy_km: endXY("origin"), destination_xy_km: endXY("destination"),
+  };
+  drawMap(plan, "#pr-pick-map", pickState, "#pr-pick-legend");
+  pickState.plan = plan;
+  const ctx = $("#pr-pick-map").getContext("2d");
+  ctx.save();
+  ctx.font = "11px system-ui, sans-serif";
+  const chosen = [$("#pr-origin").value, $("#pr-destination").value];
+  for (const p of prod.locations.presets) {           // named locations, for orientation
+    if (!p.resolved || p.resolved.row == null || chosen.includes(p.id)) continue;
+    const [x, y] = pickState.toScreen(g.x_km[p.resolved.col], g.y_km[p.resolved.row]);
+    ctx.beginPath(); ctx.arc(x, y, 3, 0, 2 * Math.PI); ctx.fillStyle = css("--muted"); ctx.fill();
+    ctx.fillStyle = css("--text-secondary"); ctx.fillText(p.name.replace(/ \(.*\)$/, ""), x + 5, y + 12);
+  }
+  for (const role of ["origin", "destination"]) {     // a picked point, and the dashed move to its routing cell
+    const pk = prod.picked[role], cell = endXY(role);
+    if (!pk || $(`#pr-${role}`).value !== MAP_VALUE) continue;
+    const [px, py] = pickState.toScreen(...pk.xy);
+    if (cell) {
+      const [cx, cy] = pickState.toScreen(...cell);
+      ctx.setLineDash([4, 3]); ctx.strokeStyle = css("--text-secondary"); ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(cx, cy); ctx.stroke(); ctx.setLineDash([]);
+    }
+    ctx.beginPath(); ctx.arc(px, py, 6, 0, 2 * Math.PI); ctx.lineWidth = 2;
+    ctx.strokeStyle = css(role === "origin" ? "--series-3" : "--series-4"); ctx.stroke();
+  }
+  ctx.restore();
+  $("#pr-pick-legend").replaceChildren(
+    el("span", {}, el("i", { class: "box", style: `background:${css("--land")}` }), "Land (routing land mask)"),
+    el("span", {}, el("i", { class: "box", style: `background:${css("--muted")}` }), "Named locations"),
+    el("span", {}, el("i", { style: `border-top-style:dashed;border-color:${css("--text-secondary")}` }), "Moved to open water"));
+  const who = prod.picking ? ROLE_LABEL[prod.picking].toLowerCase() : null;
+  $("#pr-pick-title").textContent = who ? `Click the sea to set the ${who}` : "Routing area";
+  card.classList.toggle("picking", Boolean(who));
+}
+
+$("#pr-pick-map").addEventListener("click", (ev) => {
+  const g = prod.locations && prod.locations.map, role = prod.picking;
+  if (!g || !pickState.fromScreen) return;
+  const note = $("#pr-pick-note");
+  if (!role) {
+    note.hidden = false;
+    note.textContent = "Press 📍 Pick on map next to the start or the destination first.";
+    return;
+  }
+  const rect = ev.target.getBoundingClientRect();
+  const xy = pickState.fromScreen(ev.clientX - rect.left, ev.clientY - rect.top);
+  const p = kmToLatLon(g, ...xy);
+  if (!p) {
+    note.hidden = false;
+    note.className = "pr-note bad";
+    note.textContent = "That point is outside the routing area. Click inside the map.";
+    return;
+  }
+  note.hidden = true; note.className = "pr-note";
+  prod.picked[role] = { ...p, xy };
+  $(`#pr-${role}-lat`).value = String(p.lat);
+  $(`#pr-${role}-lon`).value = String(p.lon);
+  prod.picking = null;
+  loadProductDates();
+});
+
+for (const role of ["origin", "destination"]) {
+  $(`#pr-pick-${role}`).addEventListener("click", () => armPick(role));
+  for (const k of ["lat", "lon"]) {
+    $(`#pr-${role}-${k}`).addEventListener("change", () => { prod.picked[role] = null; loadProductDates(); });
+  }
 }
 
 function showProductUnavailable(reason) {
   $("#pr-unavailable").hidden = false;
   $("#pr-unavailable-reason").textContent = reason;
   $("#pr-landing").hidden = true;
-  for (const id of ["#pr-origin", "#pr-destination", "#pr-season", "#pr-issue", "#pr-submit", "#pr-swap"]) $(id).disabled = true;
+  for (const id of ["#pr-origin", "#pr-destination", "#pr-issue", "#pr-submit", "#pr-swap",
+    "#pr-pick-origin", "#pr-pick-destination"]) $(id).disabled = true;
   $("#pr-notes").replaceChildren();
 }
 
@@ -1200,53 +1477,82 @@ async function setupProduct(status) {
   await loadProductDates();
 }
 
-$("#pr-origin").addEventListener("change", loadProductDates);
-$("#pr-destination").addEventListener("change", loadProductDates);
+for (const role of ["origin", "destination"]) {
+  $(`#pr-${role}`).addEventListener("change", () => {
+    showCoords(role);
+    if ($(`#pr-${role}`).value === MAP_VALUE && !endOf(role)) { armPick(role); return; }
+    loadProductDates();
+  });
+}
 $("#pr-swap").addEventListener("click", () => {
   const o = $("#pr-origin"), dst = $("#pr-destination"), a = o.value;
   o.value = dst.value; dst.value = a;
+  for (const k of ["lat", "lon"]) {
+    const x = $(`#pr-origin-${k}`), y = $(`#pr-destination-${k}`), t = x.value;
+    x.value = y.value; y.value = t;
+  }
+  [prod.picked.origin, prod.picked.destination] = [prod.picked.destination, prod.picked.origin];
+  showCoords("origin"); showCoords("destination");
   loadProductDates();
 });
-$("#pr-issue").addEventListener("change", () => {
-  const s = ((prod.dates?.seasons?.window) || []).find((x) => x.first <= $("#pr-issue").value && $("#pr-issue").value <= x.last);
-  if (s) $("#pr-season").value = s.season;
-  refreshForm();
-});
-$("#pr-issue").addEventListener("input", refreshForm);
-$("#pr-season").addEventListener("change", () => {
-  const s = ((prod.dates?.seasons?.window) || []).find((x) => x.season === $("#pr-season").value);
-  if (s) { $("#pr-issue").value = s.first; refreshForm(); }
-});
+$("#pr-issue").addEventListener("change", () => { prod.dateChosen = true; refreshForm(); });
+$("#pr-issue").addEventListener("input", () => { prod.dateChosen = true; refreshForm(); });
 
 /* ---- views: Plan / Result / Data & Confidence */
+/* ---- the three product pages: Plan Route (form, map, result), Voyage Simulation, Data & Confidence */
 function setView(view) {
+  if (view === "result") view = "plan";                    // the result lives on the Plan Route page
   prod.view = view;
-  document.querySelectorAll(".pr-steps button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.view === view)));
-  const has = Boolean(prod.result);
-  $("#pr-landing").hidden = view !== "plan" || has || prod.busy || !$("#pr-error").hidden || !$("#pr-unavailable").hidden;
-  $("#pr-result").hidden = view !== "result" || !has;
-  $("#pr-data").hidden = view !== "data" || !has;
-  $("#pr-sim").hidden = view !== "sim" || !has;
+  document.querySelectorAll(".tabs button").forEach((b) => b.setAttribute("aria-selected",
+    String(b.dataset.tab === "product" && b.dataset.view === view)));
+  $("#tab-product").dataset.view = view;
+  const has = Boolean(prod.result), plan = view === "plan", unavailable = !$("#pr-unavailable").hidden;
+  const idle = !has && !prod.busy && $("#pr-error").hidden;
+  $("#pr-landing").hidden = !plan || unavailable || !(idle || prod.picking);
+  $("#pr-landing").classList.toggle("single", has || prod.busy);
+  $("#pr-landing .pr-landing").hidden = has || prod.busy;
+  $("#pr-result").hidden = !plan || !has;
+  $("#pr-data").hidden = view !== "data";
+  $("#data-empty").hidden = has;
+  $("#pr-data-result").hidden = !has;
+  const sailable = has && Boolean(prod.result.route);
+  $("#pr-sim").hidden = view !== "sim" || !sailable;
+  $("#sim-empty").hidden = view !== "sim" || sailable;
   if (view !== "sim") simPause();
-  if (view === "result" && has) drawProduct();
-  if (view === "sim" && has) drawSimMap();
+  if (plan && has) drawProduct();
+  if (plan) drawPickMap();
+  if (view === "sim" && sailable) drawSimMap();
+  if (view === "data" && !has) renderDataGeneral(null);
+  updateFlow();
 }
-document.querySelectorAll(".pr-steps button").forEach((b) => b.addEventListener("click", () =>
-  (b.dataset.view === "sim" ? openSimulation() : setView(b.dataset.view))));
+
+// The subordinate progress strip: which step the person is on, and which they have reached. Not a nav.
+function updateFlow() {
+  const has = Boolean(prod.result);
+  const cur = prod.view === "plan" ? (has ? "result" : "plan") : prod.view;
+  let simulated = false;
+  try { simulated = Boolean(sim.data); } catch { /* the simulation module is not initialised yet */ }
+  const reached = { plan: has, result: has && prod.view !== "plan", sim: simulated, data: false };
+  document.querySelectorAll("#pr-flow li").forEach((li) => {
+    const step = li.dataset.step;
+    li.className = step === cur ? "current" : reached[step] ? "done" : "";
+    if (step === cur) li.setAttribute("aria-current", "step"); else li.removeAttribute("aria-current");
+  });
+}
 
 /* ---- Plan Route: exactly one POST /real/plan */
 function setBusy(on, body) {
   prod.busy = on;
   $("#pr-loading").hidden = !on;
-  for (const id of ["#pr-origin", "#pr-destination", "#pr-season", "#pr-issue", "#pr-swap"]) $(id).disabled = on;
-  $("#pr-submit").textContent = on ? "Planning…" : "Plan Route";
+  for (const id of ["#pr-origin", "#pr-destination", "#pr-issue", "#pr-swap", "#pr-pick-origin",
+    "#pr-pick-destination", "#pr-origin-lat", "#pr-origin-lon", "#pr-destination-lat", "#pr-destination-lon"]) $(id).disabled = on;
+  $("#pr-submit").replaceChildren(...(on ? ["Planning…"] : [el("b", { class: "pr-step-no" }, "4"), " Plan Route"]));
   clearInterval(prod.timer);
   if (on) {
-    const o = presetById(body.origin.preset), dst = presetById(body.destination.preset), t0 = Date.now();
-    $("#pr-loading-text").textContent = `${o ? o.name : body.origin.preset} → ${dst ? dst.name : body.destination.preset}, ` +
-      `forecast issued ${body.issue}. The server is building 200 joint sea-ice and iceberg scenarios from real ` +
-      "OSI SAF ice, the U-Net forecast, ERA5/CMEMS forcing and USNIC icebergs, then planning every departure date " +
-      "in the window against the risk budget.";
+    const t0 = Date.now(), fc = dateMode(body.issue) === "forecast";
+    $("#pr-loading-text").textContent = `${endName(body.origin)} → ${endName(body.destination)}, departing ` +
+      `${body.issue} (${fc ? "forecast / hackathon estimate" : "real historical data"}). Evaluating sea ice, ` +
+      "iceberg scenarios, wind and current forcing, route alternatives and departure dates.";
     $("#pr-elapsed").textContent = "0";
     prod.timer = setInterval(() => { $("#pr-elapsed").textContent = String(Math.round((Date.now() - t0) / 1000)); }, 1000);
   }
@@ -1264,14 +1570,13 @@ async function planRoute() {
   const problem = formProblem();
   if (problem || prod.busy) { refreshForm(); return; }
   const f = $("#pr-form");
-  const body = { origin: { preset: f.origin.value }, destination: { preset: f.destination.value }, issue: f.issue.value };
+  const body = { origin: endOf("origin"), destination: endOf("destination"), issue: f.issue.value };
+  prod.picking = null;
   prod.lastBody = body;
   $("#pr-error").hidden = true;
   // A new plan replaces the old one: never leave a previous result on screen next to new inputs or an error.
   prod.result = null;
   resetSimulation();
-  document.querySelectorAll('.pr-steps button[data-view="result"], .pr-steps button[data-view="data"], ' +
-    '.pr-steps button[data-view="sim"]').forEach((b) => { b.disabled = true; });
   const ctrl = new AbortController();
   prod.controller = ctrl;
   let timedOut = false;
@@ -1282,10 +1587,7 @@ async function planRoute() {
     const res = checkPlan(await planFetch("/real/plan", { method: "POST", body: JSON.stringify(body), signal: ctrl.signal }));
     prod.result = res;
     renderProduct(res);
-    document.querySelectorAll('.pr-steps button[data-view="result"], .pr-steps button[data-view="data"]')
-      .forEach((b) => { b.disabled = false; });
-    $('.pr-steps button[data-view="sim"]').disabled = !res.route;
-    setView("result");
+    setView("plan");
   } catch (e) {
     if (e.name === "AbortError") {
       showError(timedOut ? new PlanError("The plan took too long", `No answer from the server after ` +
@@ -1338,7 +1640,8 @@ function renderVerdict(p) {
   const bud = risk ? risk.risk_budget : budget();
   const card = $("#pr-verdict");
   card.classList.remove("ok", "bad", "none");
-  $("#pr-route-name").textContent = `${o.name || "Origin"} → ${dst.name || "Destination"} · forecast issued ${p.metadata.issue_date}`;
+  $("#pr-route-name").textContent = `${o.name || "Origin"} → ${dst.name || "Destination"} · ` +
+    (p.metadata.mode === "forecast" ? `forecast estimate for ${p.metadata.requested_date}` : `forecast issued ${p.metadata.issue_date}`);
   const badge = $("#pr-verdict-badge");
   if (p.status === "recommended") {
     card.classList.add("ok");
@@ -1366,7 +1669,10 @@ function renderVerdict(p) {
   ] : []));
   $("#pr-metrics").hidden = !r;
   $("#pr-sim-cta").hidden = !r;
-  $("#pr-sim-cta-note").textContent = p.status === "recommended" ?
+  $("#pr-sim-cta-note").textContent = p.metadata.mode === "forecast" ?
+    "Sail this route day by day with the same daily forecasts and replanning rules. Forecast estimate: the ice it " +
+    "sails through is the analogue season's real observation (proxy), not an observation of the requested dates." :
+    p.status === "recommended" ?
     "Sail this route day by day through the observed sea ice, with a new real forecast and the replanning rules " +
     "applied each day." : "This route was not recommended. The simulation shows what sailing the least-risky " +
     "option would have met, day by day, with the replanning rules applied.";
@@ -1418,7 +1724,7 @@ function drawProduct() {
     drawMap(plan, "#pr-map", prMapState, "#pr-map-legend");
     drawTrackLines("#pr-map", prMapState, p.iceberg_tracks, day.scenario_layer, "#pr-map-legend");
     drawDaySegment(p, day);
-    $("#pr-map-title").textContent = `Day ${day.day_of_voyage}: ${fmtDay(day.date)} (${layer.source || "–"} layer)`;
+    $("#pr-map-title").textContent = `Day ${day.day_of_voyage}: ${fmtDay(day.date)} (${srcLabel(layer.source)} layer)`;
     $("#pr-ramp-label").textContent = `100% P(ice ≥ ${pct(p.layers.vessel_limit, 0)}) across ${p.metadata.n_scenarios} scenarios`;
   }
   if (prWinState.result) drawWindow(prWinState.result, prWinState.budget, "#pr-window-chart", prWinState);
@@ -1483,7 +1789,7 @@ function renderDayTable(p) {
     .filter((t) => t.m && t.m.lat != null);
   $("#pr-day-title").textContent = `Day ${d.day_of_voyage} of ${p.daily.length}: ${fmtDay(d.date)}`;
   $("#pr-day-table tbody").replaceChildren(...kv([
-    ["Date", `${d.date} (scenario day ${d.scenario_layer}, ${d.layer_source || "–"} layer)`],
+    ["Date", `${d.date} (scenario day ${d.scenario_layer}, ${srcLabel(d.layer_source)} layer)`],
     ["Hours since departure (nominal)", `${num(h[0], 1)}–${num(h[1], 1)} h`],
     ["Position at end of day (nominal)", pos ? `${num(pos[0], 3)}°, ${num(pos[1], 3)}°` : "–"],
     ["Distance this day", `${num(d.distance_km, 1)} km`],
@@ -1504,6 +1810,11 @@ function renderWindow(p) {
   prWinState.result = { options: opts, selected: p.status === "recommended" ? shown : null };
   prWinState.budget = budgetV;
   const nOk = opts.filter((o) => o.feasible).length;
+  const recOpt = opts.find((o) => o.departure === shown);
+  $("#pr-window-rec").replaceChildren(...(p.status === "recommended" ? [el("b", {}, `★ Recommended departure: ${shown}`),
+    recOpt ? ` · risk upper bound ${pct(recOpt.p_breach_upper, 1)} · ${num(recOpt.expected_hours, 1)} h` : ""] :
+    shown ? [el("b", {}, `◆ No date meets the budget; least-risky shown: ${shown}`)] : ["No departure could be planned."]));
+  $("#pr-window-rec").className = "pr-window-rec" + (p.status === "recommended" ? "" : " bad");
   $("#pr-window-verdict").textContent = `${nOk} of ${opts.length} departure dates meet the ${pct(budgetV, 0)} budget. ` +
     (p.status === "recommended" ? `Recommended: ${shown}. ` : shown ? `None meets it; least-risky shown: ${shown}. ` : "") +
     `Rule: ${p.departure.rule}.`;
@@ -1526,22 +1837,60 @@ function renderWindow(p) {
   }));
 }
 
+function renderForecastData(p) {
+  const m = p.metadata, fc = m.forecast, map = fc.date_mapping, sea = fc.sea_ice, f = fc.forcing, b = fc.icebergs;
+  const model = (fc.sea_ice_forecast && fc.sea_ice_forecast.model) || {};
+  $("#pr-data-modes").replaceChildren(...[
+    ["forecastMode", "Mode", `${m.label} for ${m.requested_date}: no observations or operational forecasts exist for ` +
+      "this date in the runtime data; not live."],
+    ["proxy", "Sea ice (proxy)", `Real ${sea.source || "OSI SAF"} observations of ${sea.observed_window_used[0]} to ` +
+      `${sea.observed_window_used[1]} (analogue season ${map.analogue_season}) as the starting state; NOT observations of ` +
+      `${m.requested_date.slice(0, 4)}.`],
+    ["model", "Forecast", `Frozen residual U-Net ${model.id || ""}, ${m.n_scenarios} joint scenarios from the proxy start.`],
+    ["proxy", "Winds & currents (proxy)", `${f.winds.product} and ${f.currents.product} of ${f.winds.dates_used[0]} to ` +
+      `${f.winds.dates_used[1]}: analogue reanalysis, not a forecast.`],
+    ["observation", "Icebergs", `${b.source} list of ${b.snapshot_date} (${b.age_days_at_requested_date} d before the requested date), ` +
+      `${b.n_in_grid} of ${b.n_source_bergs} in the grid, held at their last reported position, then calibrated drift.`],
+    ["research", "Use", "Research / hackathon estimate, not certified navigation."],
+  ].map(([kind, k, v]) => el("li", {}, kindBadge(kind), el("span", { class: "src-name" }, k), el("span", {}, v))));
+  $("#pr-data-inputs tbody").replaceChildren(...kv([
+    ["Requested date", `${m.requested_date} (after the archive, which ends ${fc.archive_last_date})`],
+    ["Observations for the requested dates", fc.observations_for_requested_dates],
+    ["Analogue start", `${map.analogue_start_date} (season ${map.analogue_season}); engine days ${map.engine_days[0]} to ` +
+      `${map.engine_days[1]} shown as ${map.shown_as[0]} to ${map.shown_as[1]} (offset ${map.offset_days} d)`],
+    ["Sea ice", `${sea.status}: ${sea.file} (${short(sea.sha256)})`],
+    ["Forecast model", `${model.id || "–"} (${short(model.sha256)}), lead ${model.lead_days ?? "–"} d`],
+    ["Winds", `${f.status}: ${(f.winds.files || []).map((x) => x.file).join(", ")}`],
+    ["Currents", `${f.status}: ${(f.currents.files || []).map((x) => x.file).join(", ")}`],
+    ["Icebergs", `${b.status}: ${b.file} (${short(b.sha256)}); ${(b.ids_in_grid || []).join(", ") || "none in the grid"}`],
+    ["Drift", `${b.drift_model.model}: beta ${b.drift_model.beta}, alpha scale ${b.drift_model.alpha_scale}, ` +
+      `spread factor ${b.drift_model.spread_factor}, ${b.drift_model.members} members`],
+  ]));
+}
+
 function renderData(p) {
-  const m = p.metadata, h = m.provenance || {};
-  for (const id of ["#pr-disclosure", "#pr-data-disclosure"]) $(id).textContent = m.hindsight_disclosure;
+  const m = p.metadata, forecast = m.mode === "forecast";
+  const h = forecast ? m.forecast.engine_provenance || {} : m.provenance || {};
+  for (const id of ["#pr-disclosure", "#pr-data-disclosure"]) {
+    $(id).textContent = forecast ? m.forecast_disclosure : m.hindsight_disclosure;
+  }
+  $("#pr-disclosure").classList.toggle("forecast", forecast);
+  $("#pr-data-badge").textContent = forecast ? "Forecast estimate" : "Historical";
+  $("#pr-data-badge").className = "badge " + (forecast ? "status-forecast" : "status-historical");
   $("#pr-banners").replaceChildren(...(m.banners || []).map((b) => el("span", { class: "pr-banner" }, b)),
     el("button", { type: "button", class: "pr-link", id: "pr-open-data" }, "Data & Confidence →"));
-  $("#pr-open-data").addEventListener("click", () => setView("data"));
+  $("#pr-open-data").addEventListener("click", () => openTab(primaryButton("data")));
   const sea = h.sea_ice || {}, model = h.forecast_model || {}, f = h.forcing || {}, b = h.icebergs || {}, s = h.season;
-  $("#pr-data-modes").replaceChildren(...[
-    ["historical", "Mode", `${m.label}: a past forecast issued ${m.issue_date}, replayed with the real archive; not live.`],
-    ["historical", "Sea ice", `${sea.source || "OSI SAF"} observations up to the issue date.`],
-    ["forecast", "Forecast", `Frozen U-Net ${model.id || ""}, ${m.n_scenarios} joint scenarios.`],
-    ["historical", "Winds & currents", `${f.winds?.product || "ERA5"} and ${f.currents?.product || "CMEMS"}: hindsight forcing.`],
-    ["real", "Icebergs", `${b.source || "USNIC"} list of ${b.list_date || "–"} (${b.age_days ?? "–"} d old), ${(b.drifted || []).length} in the grid, calibrated drift.`],
-    ["schematic", "Use", "Research estimate, not certified navigation."],
-  ].map(([st, k, v]) => el("li", {}, statusBadge(st), el("span", { class: "src-name" }, k), el("span", {}, v))));
-  $("#pr-data-inputs tbody").replaceChildren(...(h.sea_ice ? inputRows(h) : kv([["Inputs", "not reported"]])));
+  if (!forecast) $("#pr-data-modes").replaceChildren(...[
+    ["historicalMode", "Mode", `${m.label}: a past forecast issued ${m.issue_date}, replayed with the real archive; not live.`],
+    ["observation", "Sea ice", `${sea.source || "OSI SAF"} observations up to the issue date.`],
+    ["model", "Forecast", `Frozen residual U-Net ${model.id || ""}, ${m.n_scenarios} joint scenarios.`],
+    ["reanalysis", "Winds & currents", `${f.winds?.product || "ERA5"} and ${f.currents?.product || "CMEMS"}: hindsight forcing.`],
+    ["observation", "Icebergs", `${b.source || "USNIC"} list of ${b.list_date || "–"} (${b.age_days ?? "–"} d old), ${(b.drifted || []).length} in the grid, calibrated drift.`],
+    ["research", "Use", "Research estimate, not certified navigation."],
+  ].map(([kind, k, v]) => el("li", {}, kindBadge(kind), el("span", { class: "src-name" }, k), el("span", {}, v))));
+  if (forecast) renderForecastData(p);
+  else $("#pr-data-inputs tbody").replaceChildren(...(h.sea_ice ? inputRows(h) : kv([["Inputs", "not reported"]])));
   const locRows = (role, loc) => [
     [`${role}: requested`, `${loc.name || loc.id || "–"} at ${ll(loc.requested)}`],
     [`${role}: used for routing`, `${ll(loc.resolved)} (cell ${(loc.cell || []).join(", ")}), ${loc.snapped ?
@@ -1551,7 +1900,8 @@ function renderData(p) {
     ...locRows("Origin", p.locations.origin), ...locRows("Destination", p.locations.destination),
     ["Route horizon", `${p.horizon?.horizon_days ?? m.horizon_days} days (great circle ${num(p.horizon?.great_circle_km)} km)`],
     ["Scenario days", `${m.scenario_days} (${m.window_days}-day window + horizon)`],
-    ["Season", s ? `${s.season} · ${s.out_of_sample ? "out-of-sample for the U-Net and drift calibration" :
+    ["Season", forecast ? `analogue ${m.forecast.date_mapping.analogue_season} (proxy start; see inputs)` :
+      s ? `${s.season} · ${s.out_of_sample ? "out-of-sample for the U-Net and drift calibration" :
       "in-sample: " + (s.in_sample_notes || []).join("; ")}` +
       `${s.independent_evaluation ? " · independent evaluation season: " + (s.evaluation_notes || []).join("; ") : ""}`
       : "–"],
@@ -1562,13 +1912,112 @@ function renderData(p) {
     ["Daily timeline", p.daily_note || "–"],
     ["Time resolution", p.route?.time_resolution || "–"],
   ]));
-  $("#pr-data-limits").replaceChildren(...(h.limitations || []).map((t) => el("li", {}, t)));
+  // A forecast result lists its own limitations (the iceberg-age rule of a held snapshot); else the engine's.
+  const limits = (forecast && m.forecast.limitations) || h.limitations || [];
+  $("#pr-data-limits").replaceChildren(...limits.map((t) => el("li", {}, t)));
   $("#pr-data-disclaimer").textContent = m.disclaimer || "";
+}
+
+// Forecast estimates: a compact "how this estimate was generated", from the response's own metadata.
+function renderHowto(p) {
+  const m = p.metadata, card = $("#pr-howto");
+  card.hidden = m.mode !== "forecast";
+  if (card.hidden) return;
+  const fc = m.forecast, map = fc.date_mapping, sea = fc.sea_ice, f = fc.forcing, b = fc.icebergs;
+  const model = (fc.sea_ice_forecast && fc.sea_ice_forecast.model) || {}, year = m.requested_date.slice(0, 4);
+  const span = (d) => `${fmtDay(d[0])} – ${fmtDay(d[1])} ${d[1].slice(0, 4)}`;
+  $("#pr-howto-list").replaceChildren(...[
+    ["Sea ice", `historical analogue start (real OSI SAF observations of ${span(sea.observed_window_used)}, ` +
+      `season ${map.analogue_season}) + frozen U-Net forecast ${model.id || ""}. Proxy, not ${year} observations.`],
+    ["Wind", `${f.winds.product} of ${span(f.winds.dates_used)}: proxy reanalysis, not a ${year} forecast.`],
+    ["Currents", `${f.currents.product} of ${span(f.currents.dates_used)}: proxy reanalysis, not a ${year} forecast.`],
+    ["Icebergs", `latest available official USNIC list (${b.snapshot_date}, ${b.age_days_at_requested_date} days ` +
+      `before departure; ${b.n_in_grid} of ${b.n_source_bergs} bergs in the area) + calibrated drift.`],
+    ["Result", "hackathon research estimate, not certified navigation."],
+  ].map(([k, v]) => el("li", {}, el("b", {}, k), " ", v)));
+}
+$("#pr-howto-more").addEventListener("click", () => openTab(primaryButton("data")));
+
+// Data & Confidence: sources and method, filled from the result's metadata when there is one.
+function renderDataGeneral(p) {
+  const m = p && p.metadata, fc = m && m.mode === "forecast" ? m.forecast : null;
+  const h = m ? (fc ? fc.engine_provenance || {} : m.provenance || {}) : {};
+  const sea = h.sea_ice || {}, model = h.forecast_model || {}, f = h.forcing || {}, b = h.icebergs || {};
+  const par = h.parameters || {}, risk = p && p.risk;
+  const item = (kind, k, v) => el("li", {}, kindBadge(kind), el("span", { class: "src-name" }, k), el("span", {}, v));
+  $("#pr-data-kinds").replaceChildren(...["observation", "reanalysis", "proxy", "model", "derived"].map(kindBadge));
+  const files = (x) => (x && x.files ? ` (${x.files.map((q) => q.file).join(", ")})` : "");
+  $("#pr-data-sources").replaceChildren(
+    item(fc ? "proxy" : "observation", "OSI SAF sea ice", fc ?
+      `Real daily 25 km observations of ${fc.sea_ice.observed_window_used.join(" – ")} (analogue season ` +
+      `${fc.date_mapping.analogue_season}), used as a proxy starting state; not observations of ${m.requested_date.slice(0, 4)}.` :
+      `${sea.source || "Daily 25 km sea-ice concentration (OSI-450-a / OSI-430-a)"}${sea.observed_through ?
+        `, observed up to ${sea.observed_through}` : ""}.`),
+    item("model", "Residual U-Net sea-ice forecast", model.id ? `Frozen ${model.id}, ${model.lead_days} days ahead, ` +
+      `trained on ${(model.train_seasons || []).length} seasons (${(model.train_seasons || [])[0]}–` +
+      `${(model.train_seasons || []).at(-1)}).` : "Frozen residual U-Net trained on past seasons; forecasts daily sea " +
+      "ice from the last 14 observed days."),
+    item("observation", "USNIC icebergs", fc ? `Official list of ${fc.icebergs.snapshot_date}, held at the last reported ` +
+      `positions until departure, then drifted.` : b.list_date ? `Official weekly list of ${b.list_date} ` +
+      `(${b.age_days} days old), ${(b.drifted || []).length} bergs in the area.` : "Official weekly U.S. National Ice Center iceberg lists."),
+    item(fc ? "proxy" : "reanalysis", "ERA5 winds", fc ? `${fc.forcing.winds.product} of ` +
+      `${fc.forcing.winds.dates_used.join(" – ")}: proxy, not a forecast.` : `${f.winds?.product || "ERA5 daily reanalysis"}` +
+      `${files(f.winds)}: hindsight reanalysis of the voyage days.`),
+    item(fc ? "proxy" : "reanalysis", "Copernicus Marine (CMEMS) currents", fc ? `${fc.forcing.currents.product} of ` +
+      `${fc.forcing.currents.dates_used.join(" – ")}: proxy, not a forecast.` : `${f.currents?.product || "CMEMS daily reanalysis"}` +
+      `${files(f.currents)}: hindsight reanalysis of the voyage days.`),
+  );
+  const n = m ? m.n_scenarios : par.members, bud = risk ? risk.risk_budget : budget();
+  $("#pr-data-method").replaceChildren(
+    item("model", "Sea-ice forecasting", "The residual U-Net forecasts the change in daily sea-ice concentration " +
+      "from the last 14 days of observed ice; a bank of its past errors turns one forecast into many plausible futures."),
+    item("model", "Iceberg drift", "Each reported berg drifts with the winds and currents in a calibrated " +
+      "ensemble" + (par.drift_beta != null ? ` (beta ${par.drift_beta}, alpha scale ${par.drift_alpha_scale}, ` +
+      `spread factor ${par.drift_spread_factor})` : "") + "; its footprint is a hazard for the route."),
+    item("derived", "Uncertainty", `${n || 200} joint sea-ice and iceberg scenarios` + (par.seed != null ?
+      ` (seed ${par.seed})` : "") + ", each scored along the whole route at its own arrival times."),
+    item("derived", "Wilson risk", `P(breach) is the share of scenarios where the route meets ice above the ` +
+      `vessel limit or an iceberg footprint. Its Wilson ${risk ? Math.round(100 * risk.confidence) : 95}% upper ` +
+      `bound must stay within the ${pct(bud, 0)} budget.`),
+    item("derived", "Time-dependent routing", "A* finds the route through the daily forecast layers for each " +
+      "departure day in the window; the lowest expected fuel within the budget is recommended."),
+    item("model", "Calibration", "Sea-ice scenarios add whole forecast-error fields from the training seasons " +
+      "(residual bank). The iceberg drift parameters" + (par.drift_beta != null ? ` (beta ${par.drift_beta}, alpha ` +
+      `scale ${par.drift_alpha_scale}, spread factor ${par.drift_spread_factor})` : "") + " were calibrated on " +
+      "hindcasts of observed iceberg tracks." + (h.probability_calibration?.applied_in_route_risk === false ?
+      " Route risk uses the scenario shares as they are; no extra probability recalibration is applied." : "")),
+    ...(fc ? [item("proxy", "Forecast mode", `Dates after the archive (${fc.archive_last_date}) start from the ` +
+      `same calendar day of ${fc.date_mapping.analogue_season} (${fc.date_mapping.offset_days} days earlier) and are ` +
+      "shown on the requested dates. Research/hackathon estimate, not certified navigation.")] : []),
+  );
+  const shown = m ? (fc ? "forecast" : "historical") : null;
+  const mark = (k) => (shown === k ? " (this result)" : "");
+  $("#pr-data-modes-general").replaceChildren(
+    item("historicalMode", "Real Historical Data" + mark("historical"), "A past departure date inside the archive " +
+      "(Nov–Feb seasons). Real observed sea ice, the frozen U-Net forecast, ERA5/CMEMS reanalysis and the USNIC lists " +
+      "of that time. The forcing is hindsight reanalysis, so this is a replay, not a live forecast."),
+    item("forecastMode", "Forecast / hackathon estimate" + mark("forecast"), "A future in-season date in the range the " +
+      "server lists for the route. The same engine runs from an analogue season: proxy sea ice and ERA5/CMEMS forcing " +
+      "of the same calendar days, plus the latest official USNIC iceberg list. No observation of the future year is " +
+      "used. Not a real forecast and not certified navigation."),
+  );
+  // General limitations without a plan; with one, the result's own limitations (from the API) are shown below.
+  $("#pr-data-limits-general-wrap").hidden = Boolean(m);
+  $("#pr-data-limits-general").replaceChildren(...[
+    "Research and hackathon decision support only: not certified for navigation.",
+    "The vessel and fuel index are generic placeholders, not a specific ship.",
+    "Risk covers sea ice above the vessel limit and iceberg footprints only; weather, sea state and other hazards " +
+      "are not scored.",
+    "Historical replays use hindsight reanalysis forcing; forecast estimates use proxy forcing from another year.",
+    "Forecast-mode estimates have not been validated against what actually happened.",
+  ].map((t) => el("li", {}, t)));
 }
 
 function renderProduct(p) {
   prod.day = 0;
   renderData(p);
+  renderDataGeneral(p);
+  renderHowto(p);
   renderVerdict(p);
   renderRisks(p);
   renderDays(p);
@@ -1605,7 +2054,7 @@ function checkSim(s) {
   if (s.status === "not_simulated") throw new PlanError("This voyage cannot be simulated", s.reason || "No reason given.", "");
   if (s.status !== "simulated") throw bad(`unknown status "${s.status}"`);
   const m = s.metadata;
-  if (!m || m.mode !== "historical" || m.execution_mode !== "real") throw bad("not labelled as real historical data");
+  if (!labelledMode(m)) throw bad("not labelled as real historical data or as a forecast estimate");
   if (!Array.isArray(s.frames) || s.frames.length < 2) throw bad("fewer than two frames");
   if (s.frames.some((f, k) => f.index !== k || !f.position || !f.route || !Array.isArray(f.track))) throw bad("frames out of order or incomplete");
   if (!s.summary || !Array.isArray(s.events) || !s.grid) throw bad("summary, events or grid missing");
@@ -1619,8 +2068,11 @@ async function runSimulation() {
   $("#sim-error").hidden = true; $("#sim-body").hidden = true; $("#sim-loading").hidden = false;
   const o = prod.result.locations.origin, d = prod.result.locations.destination;
   $("#sim-loading-text").textContent = `${o.name} → ${d.name}, departing ${prod.result.route.departure_date}. ` +
+    (prod.result.metadata.mode === "forecast" ? "Forecast estimate: for each day at sea the server sails the route " +
+    "through the analogue season's observed ice (proxy), issues that day's forecast from the same proxy inputs and " +
+    "applies the existing replanning rules." :
     "For each day at sea the server sails the route through the observed sea ice, issues that day's real forecast " +
-    "(frozen U-Net, ERA5/CMEMS, USNIC icebergs with calibrated drift) and applies the existing replanning rules.";
+    "(frozen U-Net, ERA5/CMEMS, USNIC icebergs with calibrated drift) and applies the existing replanning rules.");
   const t0 = Date.now();
   $("#sim-elapsed").textContent = "0";
   clearInterval(sim.clock);
@@ -1637,6 +2089,7 @@ async function runSimulation() {
         "Nothing synthetic is shown in its place.");
     }
     sim.data = checkSim(job.result);
+    updateFlow();
     sim.key = simKey();
     sim.i = 0;
     renderSimulation();
@@ -1662,7 +2115,12 @@ function renderSimulation() {
   $("#sim-body").hidden = false;
   const m = s.metadata, o = s.locations.origin, d = s.locations.destination;
   $("#sim-banners").replaceChildren(...(m.banners || []).map((b) => el("span", { class: "pr-banner" }, b)));
-  $("#sim-disclosure").textContent = m.hindsight_disclosure + " This is a replay of a past season, not live vessel tracking.";
+  $("#sim-disclosure").textContent = m.mode === "forecast" ? m.forecast_disclosure + " The ice sailed through is the " +
+    "analogue season's real observation (proxy); this is not live vessel tracking." :
+    m.hindsight_disclosure + " This is a replay of a past season, not live vessel tracking.";
+  $("#sim-disclosure").classList.toggle("forecast", m.mode === "forecast");
+  $("#sim-ramp-label").textContent = m.mode === "forecast" ? "100% proxy (analogue-season) sea-ice concentration" :
+    "100% observed sea-ice concentration";
   $("#sim-title").textContent = `${o.name} → ${d.name}`;
   $("#sim-subtitle").textContent = `Departed ${fmtUtc(s.frames[0].timestamp_utc)} · forecast issued ${m.issue_date} · ` +
     `${s.frames.length - 1} day(s) at sea · ` + (s.plan.status === "recommended" ? "recommended route" :
@@ -1734,7 +2192,7 @@ function drawSimMap() {
     replanned ? key(css("--series-2"), "New route ahead (after replan)") : key(css("--series-1"), "Route ahead"),
     key(css("--series-3"), "Sailed so far"), key(css("--series-8"), "Vessel", false, true),
     key(css("--berg"), "USNIC-reported iceberg", false, true));
-  $("#sim-map-title").textContent = `${fmtUtc(f.timestamp_utc)}: ` + (f.map ? `observed sea ice on ${f.map.date}` : "no sea-ice observation for this day");
+  $("#sim-map-title").textContent = `${fmtUtc(f.timestamp_utc)}: ` + (f.map ? `${obsWord(f.map.source)} on ${f.map.date}` : "no sea-ice observation for this day");
 }
 
 function frameRisk(f) {
@@ -1769,7 +2227,8 @@ function showFrame(k) {
     metric("Distance remaining", `${num(f.progress.remaining_km)} km`),
     metric("Fuel index ahead", ahead && ahead.expected_fuel != null ? num(ahead.expected_fuel) : "–", "relative index"),
     metric("Sea ice sailed today", seg && seg.max_concentration != null ? `max ${pct(seg.max_concentration, 0)}` : "–",
-      seg && seg.date ? `observed ${seg.date}` : ""),
+      seg && seg.date ? (seg.analogue_date ? `proxy: observed ${seg.analogue_date} (analogue)`
+        : `${f.observed.sea_ice_source === "proxy_analogue_observed" ? "proxy" : "observed"} ${seg.date}`) : ""),
     metric("Nearest reported berg", bergs && bergs.nearest_km != null ? `${num(bergs.nearest_km)} km` : "none in grid",
       bergs ? `${bergs.nearest_id || ""} · USNIC list ${bergs.list_date}` : ""),
   );

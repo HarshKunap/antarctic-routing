@@ -29,16 +29,26 @@ def _js() -> str:
     return (DASH / "app.js").read_text()
 
 
-def test_plan_route_is_the_default_tab_and_research_views_are_labelled():
+def test_plan_route_is_the_default_page_and_the_primary_nav_has_only_the_product():
     html = _html()
-    tabs = re.findall(r'<button role="tab" aria-selected="(true|false)" data-tab="([a-z]+)"', html)
-    assert tabs[0] == ("true", "product")
-    assert [t for s, t in tabs if s == "true"] == ["product"]
-    assert re.search(r'<section class="tab" id="tab-product">', html)
-    for tab in ("real", "hroute", "hwindow", "hvoyage", "plan", "window", "voyage", "validation"):
+    nav = html[html.index('<nav class="tabs primary-nav"'):html.index("</nav>")]
+    pages = re.findall(r'<button role="tab" aria-selected="(true|false)" data-tab="product" data-view="([a-z]+)"[^>]*>'
+                       r"([^<]+)</button>", nav)
+    assert pages == [("true", "plan", "Plan Route"), ("false", "sim", "Voyage Simulation"),
+                     ("false", "data", "Data &amp; Confidence")]
+    assert len(re.findall(r"<button", nav)) == 3
+    for word in ("synthetic", "Synthetic", "Validation", "Research", "legacy"):
+        assert word not in nav, word
+    assert re.search(r'<section class="tab" id="tab-product" data-view="plan">', html)
+    # research and synthetic views stay available, collapsed under "Research / Developer"
+    start = html.index('<details id="dev-area">')
+    dev = html[start:html.index("</details>", start)]
+    assert "<summary>Research / Developer</summary>" in dev and "open" not in dev.split(">")[0]
+    tabs = re.findall(r'<button role="tab" aria-selected="false" data-tab="([a-z]+)"', dev)
+    assert tabs == ["real", "hroute", "hwindow", "hvoyage", "plan", "window", "voyage", "validation"]
+    for tab in tabs:
         assert re.search(rf'<section class="tab" id="tab-{tab}" hidden>', html), tab
-    assert "Research &amp; legacy views" in html
-    assert "Synthetic sandbox (demo only)" in html
+    assert "Research &amp; legacy views" in dev and "Synthetic sandbox (demo only)" in dev
     assert "Antarctic Ice-Risk Routing" in html
 
 
@@ -78,4 +88,4 @@ def test_browser_plan_route_flow():
     summary = "\n".join(line for line in res.stdout.splitlines() if line.startswith(("# pass", "# fail", "not ok")))
     assert res.returncode == 0, res.stdout[-6000:] + res.stderr[-2000:]
     assert "# fail 0" in summary
-    assert int(re.search(r"# pass (\d+)", summary).group(1)) >= 36
+    assert int(re.search(r"# pass (\d+)", summary).group(1)) >= 53

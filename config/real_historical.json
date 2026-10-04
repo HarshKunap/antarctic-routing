@@ -770,6 +770,18 @@
         "sha256": "cb0735e5357b0c9ac266122db17596bdb9ec50c3f6fd210132399052ba1e23f3",
         "date": "2025-02-28"
       }
+    ],
+    "forecast_icebergs": [
+      {
+        "path": "iceberg/raw/archive/AntarcticIcebergs_20260924.csv",
+        "sha256": "4a2d2b6528d2519ff99bb71268747cf12dc3b30e7786fe62860fb2537ac975ab",
+        "date": "2026-09-24"
+      },
+      {
+        "path": "iceberg/raw/archive/AntarcticIcebergs_20261001.csv",
+        "sha256": "f512ce937a1a78f37acd5bbf513a35d6104c477728664a2fdf264110555e7507",
+        "date": "2026-10-01"
+      }
     ]
   },
   "splits": {
@@ -834,5 +846,11 @@
     "The vessel is a generic polar research vessel and its ice class is a placeholder (REPLACE_WITH_VERIFIED_CLASS); fuel is an index, not tonnes.",
     "Iceberg positions come from the latest weekly USNIC list on or before the issue date (up to 14 days old); drift starts from that position at the issue date. Only large tracked icebergs are included.",
     "Replans assume the day's sea-ice analysis is in hand that day; operational product latency is not modelled."
-  ]
+  ],
+  "forecast_mode": {
+    "label": "Forecast / hackathon estimate",
+    "usnic_max_age_days": 120,
+    "disclosure": "Forecast estimate: future-year Antarctic observations/forcing are not fully available in this demo runtime. Results use the latest available real seasonal data and explicitly labelled proxy/estimated forcing where required. This is a research/hackathon estimate, not a certified navigation route.",
+    "method": "Dates after the real archive are planned with the unchanged real-data engine from an analogue start: the same calendar day in the latest archive season that covers the run. Sea ice: that day's real OSI SAF observations (proxy starting state, not an observation of the requested year) forecast with the frozen U-Net. Winds and currents: ERA5/CMEMS reanalysis of the analogue days (proxy forcing, not a forecast). Icebergs: the latest official USNIC list on or before the requested date, positions held from the list date, then drifted with the calibrated ensemble. Engine dates map one-to-one onto the requested dates by a fixed day offset."
+  }
 }

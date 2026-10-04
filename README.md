@@ -125,6 +125,7 @@ The planner's mean predicted P(breach) at departure was 0.3% (95% upper bound 3.
 - **Voyage simulation (`POST /real/simulate`, Real Historical Data):** the planned voyage sailed day by day through the observed sea ice, with a new real forecast and the existing replanning rules each day, as playback frames; see [docs/SIMULATE_API.md](docs/SIMULATE_API.md).
 - **Additional historical season (Real Historical Data):** the separate OSI-430-a v3.0 2024-25 sea-ice file is listed under `sea_ice_additional` in `config/real_historical.json` (with its 2024-25 ERA5, CMEMS and USNIC files) and appended in memory after the frozen file. The frozen file, checkpoint and calibration are unchanged. 2024-25 is labelled an independent evaluation season.
 - **Web dashboard:** no external dependencies, light/dark, phone-width. Verified in Chromium with Playwright: every tab exercised, no console errors.
+- **Forecast mode (future dates, e.g. 2026-11-19):** dates after the real archive are planned and simulated as a labelled *Forecast / hackathon estimate* from an analogue season (proxy sea ice and ERA5/CMEMS forcing, latest official USNIC list with calibrated drift); not an operational forecast. See [docs/FORECAST_MODE.md](docs/FORECAST_MODE.md).
 - **PDF voyage brief:** [example](docs/voyage_brief_example.pdf).
 - **Docker image:** built and smoke-tested in CI.
 

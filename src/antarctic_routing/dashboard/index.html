@@ -24,44 +24,67 @@
   </header>
   <p class="disclaimer" id="disclaimer"></p>
 
-  <nav class="tabs" role="tablist">
-    <button role="tab" aria-selected="true" data-tab="product" class="tab-product">Plan Route</button>
-    <span class="tab-group">Research &amp; legacy views</span>
-    <button role="tab" aria-selected="false" data-tab="real">Frozen demo (2023-11-14)</button>
-    <button role="tab" aria-selected="false" data-tab="hroute">Route plan (research)</button>
-    <button role="tab" aria-selected="false" data-tab="hwindow">Departure window (research)</button>
-    <button role="tab" aria-selected="false" data-tab="hvoyage">Voyage &amp; replay (research)</button>
-    <span class="tab-group">Synthetic sandbox (demo only)</span>
-    <button role="tab" aria-selected="false" data-tab="plan">Route plan (synthetic)</button>
-    <button role="tab" aria-selected="false" data-tab="window">Departure window (synthetic)</button>
-    <button role="tab" aria-selected="false" data-tab="voyage">Voyage &amp; replanning (synthetic)</button>
-    <button role="tab" aria-selected="false" data-tab="validation">Validation figures</button>
+  <!-- The product: three pages. Research and synthetic views live under "Research / Developer" at the bottom. -->
+  <nav class="tabs primary-nav" role="tablist" aria-label="Product">
+    <button role="tab" aria-selected="true" data-tab="product" data-view="plan" class="tab-product">Plan Route</button>
+    <button role="tab" aria-selected="false" data-tab="product" data-view="sim">Voyage Simulation</button>
+    <button role="tab" aria-selected="false" data-tab="product" data-view="data">Data &amp; Confidence</button>
   </nav>
+  <p class="dev-banner" id="dev-banner" hidden><span id="dev-banner-text">Research / Developer view — not part of the
+    main hackathon product.</span> <span class="dev-banner-note">Kept for testing and for explaining the research;
+    synthetic views use controlled-synthetic data.</span> <button type="button" class="pr-link" id="dev-back">← Back to Plan Route</button></p>
 
   <!-- ===================== PRODUCT: PLAN ROUTE ===================== -->
   <!-- Everything shown here comes from GET /real/locations, GET /real/historical/dates and one POST /real/plan;
        the page computes no risk, route or forecast of its own and never substitutes synthetic data. -->
-  <section class="tab" id="tab-product">
-    <div class="pr-steps" role="tablist" aria-label="Plan Route views">
-      <button type="button" role="tab" data-view="plan" aria-selected="true"><b>1</b> Plan</button>
-      <button type="button" role="tab" data-view="result" aria-selected="false" disabled><b>2</b> Result</button>
-      <button type="button" role="tab" data-view="sim" aria-selected="false" disabled><b>3</b> Simulate Voyage</button>
-      <button type="button" role="tab" data-view="data" aria-selected="false" disabled><b>4</b> Data &amp; Confidence</button>
-    </div>
-
+  <section class="tab" id="tab-product" data-view="plan">
+    <!-- Progress only: derived from the page and the plan on screen, never clickable and never a second nav. -->
+    <ol class="pr-flow" id="pr-flow" aria-label="Progress">
+      <li data-step="plan" class="current" aria-current="step">Plan Route</li>
+      <li data-step="result">Route Result</li>
+      <li data-step="sim">Voyage Simulation</li>
+      <li data-step="data">Data &amp; Confidence</li>
+    </ol>
     <form class="card pr-form" id="pr-form" novalidate>
+      <div class="pr-form-head">
+        <h2>Plan Route</h2>
+        <p class="pr-lede" id="pr-intro">Tell us where you're going and when, and we'll estimate the safest route.</p>
+        <p class="sub">The planner weighs sea ice, drifting icebergs, winds, currents and their uncertainty, compares
+          departure dates, and keeps the route within the 5% risk budget. Then simulate the voyage day by day.</p>
+      </div>
       <div class="pr-fields">
-        <label>Origin
-          <select name="origin" id="pr-origin" required disabled><option>Loading locations…</option></select></label>
-        <button type="button" class="pr-swap" id="pr-swap" title="Swap origin and destination"
+        <div class="pr-field pr-end" data-role="origin">
+          <label for="pr-origin"><b class="pr-step-no">1</b> Start</label>
+          <div class="pr-end-row">
+            <select name="origin" id="pr-origin" required disabled><option>Loading locations…</option></select>
+            <button type="button" class="pr-pick" id="pr-pick-origin" data-pick="origin" disabled
+              aria-label="Pick the start on the map">📍 Pick on map</button>
+          </div>
+          <div class="pr-coords" id="pr-origin-coords" hidden>
+            <label>Lat <input type="number" id="pr-origin-lat" step="0.001" min="-90" max="90" inputmode="decimal"></label>
+            <label>Lon <input type="number" id="pr-origin-lon" step="0.001" min="-180" max="180" inputmode="decimal"></label>
+          </div>
+        </div>
+        <button type="button" class="pr-swap" id="pr-swap" title="Swap start and destination"
           aria-label="Swap origin and destination" disabled>⇄</button>
-        <label>Destination
-          <select name="destination" id="pr-destination" required disabled><option>Loading locations…</option></select></label>
-        <label>Historical season
-          <select id="pr-season" disabled><option>–</option></select></label>
-        <label>Issue / departure date
-          <input type="date" name="issue" id="pr-issue" required disabled></label>
-        <button type="submit" class="primary pr-cta" id="pr-submit" disabled>Plan Route</button>
+        <div class="pr-field pr-end" data-role="destination">
+          <label for="pr-destination"><b class="pr-step-no">2</b> Destination</label>
+          <div class="pr-end-row">
+            <select name="destination" id="pr-destination" required disabled><option>Loading locations…</option></select>
+            <button type="button" class="pr-pick" id="pr-pick-destination" data-pick="destination" disabled
+              aria-label="Pick the destination on the map">📍 Pick on map</button>
+          </div>
+          <div class="pr-coords" id="pr-destination-coords" hidden>
+            <label>Lat <input type="number" id="pr-destination-lat" step="0.001" min="-90" max="90" inputmode="decimal"></label>
+            <label>Lon <input type="number" id="pr-destination-lon" step="0.001" min="-180" max="180" inputmode="decimal"></label>
+          </div>
+        </div>
+        <div class="pr-field">
+          <label for="pr-issue"><b class="pr-step-no">3</b> Departure date</label>
+          <input type="date" name="issue" id="pr-issue" required disabled>
+          <p class="pr-examples" id="pr-examples" hidden></p>
+        </div>
+        <button type="submit" class="primary pr-cta" id="pr-submit" disabled><b class="pr-step-no">4</b> Plan Route</button>
       </div>
       <div class="pr-notes" id="pr-notes" aria-live="polite"></div>
     </form>
@@ -73,30 +96,39 @@
         its place.</p>
     </div>
 
-    <div id="pr-landing">
+    <div class="grid2 pr-landing-grid" id="pr-landing">
+      <div class="card map-card" id="pr-pick">
+        <div class="card-head">
+          <h2 id="pr-pick-title">Routing area</h2>
+          <div class="legend" id="pr-pick-legend"></div>
+        </div>
+        <p class="sub pr-small" id="pr-pick-hint">Choose a start and destination from the lists, or press
+          <b>📍 Pick on map</b> and click the sea.</p>
+        <canvas id="pr-pick-map" width="760" height="560" aria-label="Map for picking the start and destination"></canvas>
+        <p class="pr-note" id="pr-pick-note" aria-live="polite" hidden></p>
+      </div>
       <div class="card pr-landing">
-        <h2>Plan a risk-budgeted Antarctic route on real historical data</h2>
+        <h2>Plan a risk-budgeted Antarctic voyage</h2>
         <ol class="pr-how">
-          <li><b>Origin</b><span>Choose where the voyage starts.</span></li>
-          <li><b>Destination</b><span>Choose where it ends. Points on land move to the nearest open-water cell, and
-            the page says so.</span></li>
-          <li><b>Date</b><span>Pick a past issue date. The forecast is issued that day; departures are tried on it and
-            the following days.</span></li>
-          <li><b>Plan Route</b><span>The real model builds 200 joint sea-ice and iceberg scenarios and finds the
-            departure and route that keep risk within the budget.</span></li>
+          <li><b>Start</b><span>Where the ship sails from: a named location or a point picked on the map.</span></li>
+          <li><b>Destination</b><span>Where it is going. A point on land or in ice-locked water moves to the
+            nearest open-water routing cell, and the page shows how far.</span></li>
+          <li><b>Departure date</b><span>A past date replays <b>Real Historical Data</b>; a future date in the
+            supported range gives a labelled <b>Forecast / hackathon estimate</b>.</span></li>
+          <li><b>Plan Route</b><span>200 joint sea-ice and iceberg scenarios pick the departure and route that keep
+            the risk within the 5% budget.</span></li>
         </ol>
-        <p class="sub">You get a recommended departure, ETA, duration, distance and fuel index; sea-ice, iceberg and
-          combined risk; a route map with a day-by-day timeline; and every departure option in the window.
-          No result is shown until you plan one.</p>
+        <p class="sub">Then simulate the voyage day by day, and check how the estimate was made under
+          Data &amp; Confidence.</p>
       </div>
     </div>
 
     <div class="card pr-loading" id="pr-loading" hidden role="status" aria-live="polite">
       <div class="spinner" aria-hidden="true"></div>
       <div>
-        <h2>Running the real historical model…</h2>
+        <h2 id="pr-loading-title">Building route estimate…</h2>
         <p id="pr-loading-text"></p>
-        <p class="sub"><span id="pr-elapsed">0</span> s elapsed. The server answers when the whole plan is ready.</p>
+        <p class="sub"><span id="pr-elapsed">0</span> s elapsed</p>
         <button type="button" id="pr-cancel">Cancel</button>
       </div>
     </div>
@@ -127,7 +159,11 @@
         </div>
       </div>
 
-      <div class="pr-risks" id="pr-risks"></div>
+      <div class="card pr-howto" id="pr-howto" hidden>
+        <h2>How this estimate was generated</h2>
+        <ul class="pr-howto-list" id="pr-howto-list"></ul>
+        <button type="button" class="pr-link" id="pr-howto-more">Full details in Data &amp; Confidence →</button>
+      </div>
 
       <div class="grid2 spaced">
         <div class="card map-card">
@@ -148,20 +184,38 @@
         </div>
       </div>
 
+      <div class="pr-risks" id="pr-risks"></div>
+
       <div class="card spaced">
-        <h2>Departure window</h2>
-        <p class="verdict" id="pr-window-verdict"></p>
+        <div class="card-head">
+          <h2>Departure window</h2>
+          <span class="pr-aid">Supporting decision aid</span>
+        </div>
+        <p class="pr-window-rec" id="pr-window-rec"></p>
+        <p class="sub" id="pr-window-verdict"></p>
         <canvas id="pr-window-chart" width="1100" height="300" aria-label="Departure options chart"></canvas>
         <div class="tooltip" id="pr-window-tip" hidden></div>
-        <div class="table-wrap"><table class="data" id="pr-options">
-          <thead><tr><th>Departure</th><th>Budget</th><th class="num">P(breach) 95% upper</th>
-            <th class="num">Expected time (h)</th><th class="num">Δ time vs shown</th><th>Expected arrival</th>
-            <th class="num">Fuel index</th><th>Support</th></tr></thead>
-          <tbody></tbody></table></div>
+        <details class="pr-more" id="pr-options-more">
+          <summary>All departure options (table)</summary>
+          <div class="table-wrap"><table class="data" id="pr-options">
+            <thead><tr><th>Departure</th><th>Budget</th><th class="num">P(breach) 95% upper</th>
+              <th class="num">Expected time (h)</th><th class="num">Δ time vs shown</th><th>Expected arrival</th>
+              <th class="num">Fuel index</th><th>Support</th></tr></thead>
+            <tbody></tbody></table></div>
+        </details>
       </div>
     </div>
 
+    <div class="card pr-empty" id="sim-empty" hidden>
+      <h2>No route planned yet.</h2>
+      <p class="verdict">Voyage Simulation sails the route you plan, one day at a time, with the same daily
+        forecasts and replanning rules.</p>
+      <button type="button" class="primary" data-goto="plan">← Plan a route</button>
+    </div>
+
     <div id="pr-sim" hidden>
+      <p class="pr-intro" id="sim-intro">The planned route sailed day by day: each day a new forecast is issued from
+        the modelled scenarios, and the existing replanning rules keep or change the route.</p>
       <div class="pr-banners" id="sim-banners"></div>
       <p class="pr-disclosure" id="sim-disclosure"></p>
 
@@ -233,8 +287,33 @@
     </div>
 
     <div id="pr-data" hidden>
-      <div class="card">
-        <h2>Data &amp; Confidence <span class="badge status-historical">Historical</span></h2>
+      <div class="card pr-empty" id="data-empty" hidden>
+        <h2>How the product works</h2>
+        <p class="verdict">Plan a route to see the exact inputs, files and dates behind it.</p>
+        <button type="button" class="primary" data-goto="plan">Go to Plan Route</button>
+      </div>
+      <div class="grid2">
+        <div class="card">
+          <h2>Data sources</h2>
+          <p class="pr-kinds" id="pr-data-kinds"></p>
+          <ul class="sources" id="pr-data-sources"></ul>
+        </div>
+        <div class="card">
+          <h2>Forecast methodology</h2>
+          <ul class="sources" id="pr-data-method"></ul>
+        </div>
+      </div>
+      <div class="card spaced">
+        <h2>Historical replay vs forecast estimate</h2>
+        <ul class="sources" id="pr-data-modes-general"></ul>
+        <div id="pr-data-limits-general-wrap">
+          <h3>Limitations</h3>
+          <ol class="limits" id="pr-data-limits-general"></ol>
+        </div>
+      </div>
+    <div id="pr-data-result">
+      <div class="card spaced">
+        <h2>This result <span class="badge status-historical" id="pr-data-badge">Historical</span></h2>
         <p class="pr-disclosure" id="pr-data-disclosure"></p>
         <ul class="sources" id="pr-data-modes"></ul>
       </div>
@@ -255,6 +334,7 @@
         <ol class="limits" id="pr-data-limits"></ol>
         <p class="sub" id="pr-data-disclaimer"></p>
       </div>
+    </div>
     </div>
   </section>
 
@@ -585,6 +665,26 @@
       <code>trust-horizon</code>, <code>replay</code>, <code>backtest</code>, <code>sensitivity</code>).</p>
     <div class="figs" id="figs"></div>
   </section>
+
+  <footer class="dev-area">
+    <details id="dev-area">
+      <summary>Research / Developer</summary>
+      <p class="sub">Internal research views and the synthetic sandbox. They are not part of the product; the
+        synthetic views use controlled-synthetic data.</p>
+      <nav class="tabs dev-tabs" role="tablist" aria-label="Research and developer views">
+        <span class="tab-group">Research &amp; legacy views</span>
+        <button role="tab" aria-selected="false" data-tab="real">Frozen demo (2023-11-14)</button>
+        <button role="tab" aria-selected="false" data-tab="hroute">Route plan (research)</button>
+        <button role="tab" aria-selected="false" data-tab="hwindow">Departure window (research)</button>
+        <button role="tab" aria-selected="false" data-tab="hvoyage">Voyage &amp; replay (research)</button>
+        <span class="tab-group">Synthetic sandbox (demo only)</span>
+        <button role="tab" aria-selected="false" data-tab="plan">Route plan (synthetic)</button>
+        <button role="tab" aria-selected="false" data-tab="window">Departure window (synthetic)</button>
+        <button role="tab" aria-selected="false" data-tab="voyage">Voyage &amp; replanning (synthetic)</button>
+        <button role="tab" aria-selected="false" data-tab="validation">Validation figures</button>
+      </nav>
+    </details>
+  </footer>
 </div>
 <script src="static/app.js"></script>
 </body>

@@ -291,3 +291,38 @@ def test_api_dates_follow_the_route_horizon(client):
     assert set(far["route_dates"]) <= set(default["route_dates"])
     out = client.get("/real/historical/dates?origin=drake_passage&destination=mcmurdo")
     assert out.status_code == 422 and out.json()["detail"]["status"] == "invalid_location"
+
+
+def test_api_serves_the_pick_map_grid_land_and_cell_positions(client):
+    m = client.get("/real/locations").json()["map"]
+    ny, nx = client.grid.shape
+    assert (m["nx"], m["ny"], m["crs"]) == (nx, ny, "EPSG:3031")
+    assert m["land"] == client.land.astype(int).ravel().tolist()
+    assert m["navigable"] == navigable_mask(client.land).astype(int).ravel().tolist()
+    k = 7 * nx + 11
+    assert (m["lat"][k], m["lon"][k]) == (pytest.approx(client.grid.lat2d[7, 11], abs=1e-4),
+                                          pytest.approx(client.grid.lon2d[7, 11], abs=1e-4))
+    assert not any(n and l for n, l in zip(m["navigable"], m["land"], strict=True))        # land is never navigable
+
+
+def test_api_dates_accept_points_resolved_with_the_same_snapping(client):
+    land_cell = np.argwhere(client.land & np.roll(navigable_mask(client.land), 1, axis=1))[0]
+    on_land = {"lat": float(client.grid.lat2d[tuple(land_cell)]), "lon": float(client.grid.lon2d[tuple(land_cell)])}
+    sea = _sea(client)
+    q = (f"origin_lat={sea['lat']}&origin_lon={sea['lon']}"
+         f"&destination_lat={on_land['lat']}&destination_lon={on_land['lon']}")
+    body = client.get(f"/real/historical/dates?{q}").json()
+    resolved = client.post("/real/locations/resolve", json={"origin": sea, "destination": on_land}).json()
+    assert body["route"]["origin"] == resolved["origin"] and body["route"]["destination"] == resolved["destination"]
+    assert body["route"]["destination"]["snapped"] is True
+    assert not client.land[tuple(body["route"]["destination"]["cell"])]                  # never a land endpoint
+    assert body["horizon_days"] == resolved["horizon"]["horizon_days"]
+    mixed = client.get(f"/real/historical/dates?origin=drake_passage&destination_lat={sea['lat']}"
+                       f"&destination_lon={sea['lon']}").json()
+    assert mixed["route"]["origin"]["id"] == "drake_passage" and mixed["route"]["destination"]["id"] is None
+    for bad in ("origin_lat=-40&origin_lon=-60&destination=drake_passage",           # outside the grid
+                "origin_lat=-62&destination=drake_passage"):                         # half a point
+        r = client.get(f"/real/historical/dates?{bad}")
+        assert r.status_code == 422 and r.json()["detail"]["status"] == "invalid_location", bad
+    assert "outside the routing grid" in client.get(
+        "/real/historical/dates?origin_lat=-40&origin_lon=-60&destination=drake_passage").json()["detail"]["reason"]
