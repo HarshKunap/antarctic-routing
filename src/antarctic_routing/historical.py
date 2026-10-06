@@ -353,6 +353,13 @@ _EVAL_NOTES = {
 
 
 # --------------------------------------------------------------------------- planner
+def drift_kwargs(p: dict) -> dict:
+    """The calibrated drift parameters of ``p`` (the input spec's ``parameters``), as ``plan-window`` passes them."""
+    a = float(p["drift_alpha_scale"])
+    return {"beta": float(p["drift_beta"]), "alpha_range": (0.01 * a, 0.03 * a),
+            "spread_factor": float(p["drift_spread_factor"])}
+
+
 class HistoricalPlanner:
     """The frozen U-Net forecast context over the verified archive (heavy: built once, then reused)."""
 
@@ -384,10 +391,7 @@ class HistoricalPlanner:
 
     def drift_kwargs(self) -> dict:
         """The calibrated drift parameters, exactly as ``plan-window --drift-*`` passes them."""
-        p = self.archive.params
-        a = float(p["drift_alpha_scale"])
-        return {"beta": float(p["drift_beta"]), "alpha_range": (0.01 * a, 0.03 * a),
-                "spread_factor": float(p["drift_spread_factor"])}
+        return drift_kwargs(self.archive.params)
 
     def world(self, issue: date, n_days: int) -> tuple[ScenarioSet, IcebergSnapshot]:
         """Joint sea-ice + iceberg scenarios issued on ``issue`` (same draws as ``plan-window``, seed 42)."""

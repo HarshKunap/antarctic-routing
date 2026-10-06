@@ -251,10 +251,15 @@ def test_historical_dates_stay_in_historical_mode(client):
 
 
 def test_unsupported_future_dates_are_refused_never_substituted(client):
-    for issue, status in (("2023-06-15", "out_of_coverage"), ("2025-01-10", "forecast_unavailable")):
+    # Any later date falls back to a historical seasonal analogue; this stand-in has no off-season inputs, so the
+    # analogue is blocked and the date is refused with both reasons (tests/test_seasonal_analogue.py serves it).
+    for issue in ("2023-06-15", "2025-01-10"):
         r = client.post("/real/plan", json={**BODY, "issue": issue})
-        assert r.status_code == 422 and r.json()["detail"]["status"] == status, issue
+        assert r.status_code == 422 and r.json()["detail"]["status"] == "forecast_unavailable", issue
+        assert "no historical seasonal analogue: blocked" in r.json()["detail"]["reason"], issue
         assert client.post("/real/simulate?wait=true", json={**BODY, "issue": issue}).status_code == 422
+    r = client.post("/real/plan", json={**BODY, "issue": "2022-06-15"})          # past and outside the archive
+    assert r.status_code == 422 and r.json()["detail"]["status"] == "out_of_coverage"
 
 
 def test_dates_endpoint_lists_the_forecast_range(client):

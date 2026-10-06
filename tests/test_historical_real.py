@@ -7,6 +7,7 @@ PyTorch are present; the inputs are kept outside Git.
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -285,14 +286,20 @@ def test_2024_25_forecasts_use_real_daily_forcing_never_schematic():
 
 
 def test_2024_25_refuses_unsupported_dates_with_the_reason(client):
+    # dates up to the end of the archive (2025-02-28) are Real Historical Data only: uncovered ones are refused
     for issue, why in (("2024-11-13", "14 contiguous in-season days"),
                        ("2025-02-10", "daily ERA5 winds are missing"),
-                       ("2025-03-05", "not in the sea-ice archive"),
                        ("2024-06-15", "not in the sea-ice archive")):
         r = client.post("/real/plan", json={**DB, "issue": issue})
         assert r.status_code == 422 and r.json()["detail"]["status"] == "out_of_coverage", issue
         assert why in r.json()["detail"]["reason"], issue
         assert client.post("/real/simulate?wait=true", json={**DB, "issue": issue}).status_code == 422
+    # a later date is an estimate (here a historical seasonal analogue), never a refusal for being off season
+    r = client.post("/real/plan", json={**DB, "issue": "2025-03-05"})
+    assert r.status_code == 200 and r.json()["metadata"]["mode"] == "forecast"
+    f = r.json()["metadata"]["forecast"]
+    assert (f["pathway"], f["analogue_date"]) == ("seasonal_analogue", "2024-03-05")
+    assert "outside the Nov-Feb season" in f["pathway_reason"]
 
 
 def test_2024_25_plan_and_simulation_are_deterministic(client):
@@ -312,6 +319,7 @@ def test_2024_25_plan_and_simulation_are_deterministic(client):
 
 # ------------------------------------------------------------------ forecast mode (dates after the archive)
 FC = {"origin": {"preset": "drake_passage"}, "destination": {"preset": "bransfield_strait"}, "issue": "2026-11-19"}
+ARCHIVE_END = "2025-02-28"
 
 
 def _no_observation_claims(obj, path=""):
@@ -328,7 +336,7 @@ def _no_observation_claims(obj, path=""):
     elif isinstance(obj, str):
         assert obj != "observed", path
         if "observ" in path.lower() and "/icebergs" not in path and "observations_for_requested_dates" not in path:
-            assert not any(y in obj for y in ("2025-", "2026-", "2027-")), (path, obj)
+            assert all(d <= ARCHIVE_END for d in re.findall(r"\d{4}-\d{2}-\d{2}", obj)), (path, obj)
 
 
 def test_2026_11_19_is_planned_in_forecast_mode_from_labelled_proxies(client):
@@ -376,17 +384,26 @@ def test_2026_11_19_is_planned_in_forecast_mode_from_labelled_proxies(client):
     assert hist["metadata"]["mode"] == "historical" and hist["risk"]["sea_ice"] == risk["sea_ice"]
 
 
-def test_forecast_dates_are_listed_after_the_archive_and_unsupported_ones_refused(client):
+def test_forecast_dates_are_listed_and_every_later_date_is_estimated(client):
     d = client.get("/real/historical/dates?origin=drake_passage&destination=bransfield_strait").json()
     f = d["forecast"]
-    assert (f["first"], f["last"], len(f["dates"])) == ("2026-11-14", "2027-01-29", 77)
+    assert (f["first"], f["last"], len(f["dates"])) == ("2026-11-14", "2027-01-29", 77)   # proxy-forecast range
     assert d["window_dates"][-1] == "2025-02-09"                                     # historical range unchanged
-    for issue, status, why in (("2026-06-15", "out_of_coverage", "not in the sea-ice archive"),     # off season
-                               ("2027-11-20", "forecast_unavailable", "no recent official iceberg"),
-                               ("2026-11-13", "forecast_unavailable", "no archive season can start")):
+    e = d["estimate"]
+    assert e["any_date_after"] == "2025-02-28" and e["analogue"]["available"] is True, e
+    # dates the proxy forecast cannot serve fall back to a historical seasonal analogue, with the reason recorded
+    for issue, analogue, why, kind in (
+            ("2026-06-15", "2024-06-15", "outside the Nov-Feb season", "analogue_year"),
+            ("2027-11-20", "2024-11-20", "no recent official iceberg", "analogue_year"),
+            ("2026-11-13", "2024-11-13", "no archive season can start", "recent_official")):
         r = client.post("/real/plan", json={**FC, "issue": issue})
-        assert r.status_code == 422 and r.json()["detail"]["status"] == status, issue
-        assert why in r.json()["detail"]["reason"], issue
+        assert r.status_code == 200, (issue, r.text)
+        fm = r.json()["metadata"]["forecast"]
+        assert (fm["pathway"], fm["analogue_date"], fm["icebergs"]["kind"]) == ("seasonal_analogue", analogue, kind)
+        assert why in fm["pathway_reason"], issue
+    # a past date the archive does not cover is still refused, never replaced by another date
+    r = client.post("/real/plan", json={**FC, "issue": "2022-06-15"})
+    assert r.status_code == 422 and r.json()["detail"]["status"] == "out_of_coverage"
 
 
 def test_forecast_simulation_sails_the_proxy_and_is_deterministic(client):
@@ -405,3 +422,88 @@ def test_forecast_simulation_sails_the_proxy_and_is_deterministic(client):
     assert u["sailed"]["distance_km"] == pytest.approx(837.75, abs=0.01) and "forecast_mode" in u["notes"]
     _no_observation_claims(s)
     assert _simulate(client, FC) == s
+
+
+# ------------------------------------------------------------------ any future date: historical seasonal analogue
+EXAMPLES = (("2026-11-19", "proxy_forecast", "2024-11-19"), ("2026-12-15", "proxy_forecast", "2024-12-15"),
+            ("2027-01-20", "proxy_forecast", "2025-01-20"), ("2027-02-15", "seasonal_analogue", "2024-02-15"),
+            ("2027-08-14", "seasonal_analogue", "2024-08-14"), ("2028-03-03", "seasonal_analogue", "2024-03-03"),
+            ("2030-08-14", "seasonal_analogue", "2024-08-14"))
+
+
+@pytest.mark.parametrize("issue,pathway,analogue", EXAMPLES)
+def test_every_example_future_date_is_accepted_and_records_its_analogue(client, issue, pathway, analogue):
+    r = client.post("/real/plan", json={**FC, "issue": issue})
+    assert r.status_code == 200, r.text
+    j = r.json()
+    m, f = j["metadata"], j["metadata"]["forecast"]
+    assert (m["mode"], m["execution_mode"], m["data_status"]) == ("forecast", "modelled", "forecast_estimate")
+    assert m["banners"][0] == "FORECAST / HACKATHON ESTIMATE" and m["requested_date"] == issue
+    assert (f["pathway"], f["date_mapping"]["analogue_start_date"]) == (pathway, analogue)
+    assert f["date_mapping"]["shown_as"][0] == issue                                 # never another date
+    assert j["status"] in ("recommended", "no_feasible_departure") and j["route"] is not None
+    _no_observation_claims(j)
+
+
+def test_august_2027_is_a_labelled_seasonal_analogue_with_its_real_dates_and_caveats(client):
+    r = client.post("/real/plan", json={**FC, "issue": "2027-08-14"})
+    j = r.json()
+    m, f = j["metadata"], j["metadata"]["forecast"]
+    assert m["banners"] == ["FORECAST / HACKATHON ESTIMATE",
+                            "Historical seasonal analogue: real sea ice, winds and currents of earlier years",
+                            "Research estimate, not certified navigation"]
+    assert m["forecast_disclosure"] == SPEC["seasonal_analogue"]["disclosure"]
+    assert "not a meteorological or oceanographic forecast" in m["forecast_disclosure"]
+    assert (f["pathway"], f["pathway_label"]) == ("seasonal_analogue", "Historical seasonal analogue")
+    assert (f["requested_date"], f["analogue_date"], f["archive_last_date"]) == \
+        ("2027-08-14", "2024-08-14", "2025-02-28")
+    assert f["observations_for_requested_dates"].startswith("none")
+    dm = f["date_mapping"]
+    assert dm["engine_days"] == ["2024-08-14", "2024-09-02"] and dm["shown_as"] == ["2027-08-14", "2027-09-02"]
+    assert "outside the Nov-Feb archive seasons" in dm["analogue_season"]
+    sea = f["sea_ice"]
+    assert sea["status"] == "historical_analogue_ensemble" and sea["member_years"] == list(range(2023, 2016, -1))
+    assert sea["day_shifts"] == [-7, 7] and sea["members"] == 200 and 2024 not in sea["member_years"]
+    pins = {e["path"].rsplit("/", 1)[-1]: e["sha256"] for e in SPEC["inputs"]["analogue_sea_ice"]}
+    assert {x["file"]: x["sha256"] for x in sea["off_season_files"]}.items() <= pins.items()
+    assert f["forcing"]["status"] == "historical_reanalysis_analogue"
+    assert f["forcing"]["winds"]["dates_used"] == f["forcing"]["currents"]["dates_used"] == ["2024-08-14", "2024-09-02"]
+    b = f["icebergs"]
+    assert (b["kind"], b["snapshot_date"], b["file"]) == \
+        ("analogue_year", "2024-08-08", "AntarcticIcebergs_20240808.csv")
+    assert b["sha256"] in {e["sha256"] for e in SPEC["inputs"]["analogue_icebergs"]}
+    assert (b["age_days_at_analogue_date"], b["max_age_days"]) == (6, 14)
+    # winter ice: the estimate is honest about risk and confidence instead of refusing the date
+    c = f["confidence"]
+    assert c["level"] == "very low" and any("Not a forecast" in x for x in c["caveats"])
+    assert c["sea_ice_spread"]["range"] >= 0.1
+    assert j["status"] == "no_feasible_departure" and j["departure"]["recommended"] is None
+    assert j["risk"]["combined"]["breaches"] > 100
+    _no_observation_claims(j)
+    assert client.post("/real/plan", json={**FC, "issue": "2027-08-14"}).content == r.content    # deterministic
+    # 2030-08-14 uses the same analogue (the most recent August with real data) and is shown on its own dates
+    far = client.post("/real/plan", json={**FC, "issue": "2030-08-14"}).json()
+    ff = far["metadata"]["forecast"]
+    assert ff["analogue_date"] == "2024-08-14" and ff["date_mapping"]["shown_as"][0] == "2030-08-14"
+    assert far["risk"] == j["risk"] and far["route"]["departure_date"].startswith("2030-08-")
+    assert any("5.5 years after the latest real observation" in x for x in ff["confidence"]["caveats"])
+
+
+def test_analogue_simulation_sails_the_analogue_years_ice_and_never_fakes_a_gap(client):
+    s = _simulate(client, {**FC, "issue": "2028-03-03"})
+    m = s["metadata"]
+    assert s["status"] == "simulated" and m["mode"] == "forecast" and m["execution_mode"] == "modelled"
+    assert m["departure_date"] == "2028-03-03" and "Seasonal-analogue" in m["simulation_note"]
+    assert [f["date"] for f in s["frames"]] == ["2028-03-03", "2028-03-04", "2028-03-04"]
+    seg = s["frames"][1]["observed"]["sea_ice_on_segment"]
+    assert (seg["date"], seg["analogue_date"], seg["source"]) == ("2028-03-03", "2024-03-03", "proxy_analogue_observed")
+    assert s["frames"][1]["observed"]["icebergs"]["file"] == "AntarcticIcebergs_20240301.csv"
+    u = s["summary"]
+    assert u["arrived"] and u["replans"] == 0 and u["arrival_utc"] == "2028-03-04T14:09Z"
+    assert u["sailed"]["distance_km"] == pytest.approx(837.75, abs=0.01)
+    assert _simulate(client, {**FC, "issue": "2028-03-03"}) == s
+    # the analogue year (2024) has no OSI SAF ice on 15-17 Sep upstream: the plan works, the voyage says why not
+    assert client.post("/real/plan", json={**FC, "issue": "2027-09-05"}).status_code == 200
+    gap = client.post("/real/simulate?wait=true", json={**FC, "issue": "2027-09-05"}).json()["result"]
+    assert gap["status"] == "not_simulated"
+    assert "2024-09-15, 2024-09-16, 2024-09-17 (missing upstream)" in gap["reason"]

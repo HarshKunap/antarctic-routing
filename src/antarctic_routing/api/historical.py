@@ -17,9 +17,12 @@ POST /real/simulate[?wait=true]              the voyage /real/plan chose, sailed
                                              ice with the existing daily replanning, as playback frames (job; see
                                              :mod:`antarctic_routing.simulation`)
 
-``/real/plan`` and ``/real/simulate`` also accept an issue date after the archive's last day: such dates are
-planned in **forecast mode** (``metadata.mode == "forecast"``), the same engine from a labelled analogue start
-with proxy sea ice and forcing and the latest official iceberg list (see :mod:`antarctic_routing.forecast_mode`).
+``/real/plan`` and ``/real/simulate`` also accept any issue date after the archive's last day
+(``metadata.mode == "forecast"``, a labelled estimate). When the forecast pathway can serve it, it is planned there:
+the same engine from a labelled analogue start with proxy sea ice and forcing and the latest official iceberg list
+(see :mod:`antarctic_routing.forecast_mode`). Otherwise - another month, another year - it is a **historical seasonal
+analogue** estimate from real observations of the same calendar period in earlier years
+(``metadata.forecast.pathway == "seasonal_analogue"``; see :mod:`antarctic_routing.seasonal_analogue`).
 
 Routes, departure windows, voyages and replays take an optional ``origin`` and ``destination`` (a preset id
 ``{"preset": "palmer_station"}`` or a point ``{"lat": .., "lon": ..}``; both or neither). Points are snapped to
@@ -66,7 +69,6 @@ from antarctic_routing.forecast_mode import (
     ForecastUnavailable,
     forecast_metadata,
     forecast_usnic,
-    is_forecast_date,
     resolve,
     shift_dates,
 )
@@ -78,6 +80,8 @@ from antarctic_routing.historical import (
     HistoricalPlanner,
     HistoricalUnavailable,
     OutOfCoverage,
+    UsnicArchive,
+    drift_kwargs,
     provenance,
 )
 from antarctic_routing.ingestion.icebergs import in_grid_mask
@@ -96,6 +100,15 @@ from antarctic_routing.publish import UNAVAILABLE, grid_geometry, iceberg_tracks
 from antarctic_routing.routing.candidates import Candidate, plan_candidates
 from antarctic_routing.routing.departure import plan_from_issue
 from antarctic_routing.routing.replan import ReplanPolicy, replan
+from antarctic_routing.seasonal_analogue import (
+    AnalogueData,
+    AnaloguePlanner,
+    AnalogueUnavailable,
+    analogue_metadata,
+)
+from antarctic_routing.seasonal_analogue import (
+    resolve as resolve_analogue,
+)
 
 log = logging.getLogger("antarctic_routing.api")
 
@@ -174,6 +187,8 @@ class HistoricalService:
         self._planner: HistoricalPlanner | None = None
         self._resolver: LocationResolver | None = None
         self._error: HistoricalUnavailable | None = None
+        self._analogue: AnalogueData | None = None
+        self._analogue_error: HistoricalUnavailable | None = None
         self._lock = threading.Lock()
 
     def _unavailable(self) -> HistoricalUnavailable | None:
@@ -212,6 +227,21 @@ class HistoricalService:
         if err is not None:
             raise HTTPException(503, {"status": err.status, "reason": err.reason, "label": LABEL})
         return self._planner
+
+    def analogue(self) -> AnalogueData:
+        """The year-round observations for seasonal-analogue estimates (raises HistoricalUnavailable)."""
+        archive = self.archive()
+        with self._lock:
+            if self._analogue is None and self._analogue_error is None:
+                try:
+                    self._analogue = AnalogueData.load(archive)
+                    log.info("Seasonal-analogue inputs verified under %s", self.data_root)
+                except HistoricalUnavailable as exc:
+                    self._analogue_error = exc
+                    log.error("Seasonal analogue %s: %s", exc.status, exc.reason)
+            if self._analogue_error is not None:
+                raise self._analogue_error
+            return self._analogue
 
     def resolver(self) -> LocationResolver:
         """Snaps locations on the archive's routing grid and land mask (the cells routes actually use)."""
@@ -344,7 +374,20 @@ def register(app: FastAPI, svc) -> HistoricalService:
         if spec is not None:
             out["route"] = spec.to_dict()
         out["forecast"] = forecast_dates(a, n_window)
+        out["estimate"] = estimate_info(a)
         return out
+
+    def estimate_info(a: HistoricalArchive) -> dict:
+        """Any date after the archive is accepted: the forecast pathway on its dates, else a seasonal analogue."""
+        info = {"any_date_after": a.days[-1].isoformat(), "label": "Forecast / hackathon estimate",
+                "pathways": {"proxy_forecast": "the dates listed under 'forecast'",
+                             "seasonal_analogue": "every other date after the archive"},
+                "analogue": {"available": True, "reason": None, "label": "Historical seasonal analogue"}}
+        try:
+            hs.analogue()
+        except HistoricalUnavailable as exc:
+            info["analogue"].update(available=False, reason=f"{exc.status}: {exc.reason}")
+        return info
 
     forecast_dates_cache: dict[int, dict] = {}
 
@@ -467,20 +510,48 @@ def register(app: FastAPI, svc) -> HistoricalService:
         }
         return body, world, snap
 
-    def forecast_setup(issue: date, n_days: int):
+    def estimate_setup(issue: date, n_days: int):
+        """("forecast", setup) when the forecast pathway can serve ``issue``, else ("analogue", setup) from a
+        historical seasonal analogue; 422 only when neither can (both reasons are given)."""
         a = hs.archive()
         try:
-            return resolve(a, issue, n_days, forecast_usnic(a))
+            recent = forecast_usnic(a)
         except ForecastUnavailable as exc:
-            raise HTTPException(422, {"status": "forecast_unavailable", "reason": str(exc),
-                                      "label": "Forecast / hackathon estimate"}) from None
+            recent, reason = None, str(exc)
+        else:
+            try:
+                return "forecast", resolve(a, issue, n_days, recent)
+            except ForecastUnavailable as exc:
+                reason = str(exc)
+        try:
+            data = hs.analogue()
+            setup = resolve_analogue(data, issue, n_days,
+                                     recent or UsnicArchive(a.spec["inputs"]["icebergs"], a.root), reason)
+        except (HistoricalUnavailable, AnalogueUnavailable) as exc:
+            why = f"{exc.status}: {exc.reason}" if isinstance(exc, HistoricalUnavailable) else str(exc)
+            raise HTTPException(422, {"status": "forecast_unavailable", "label": "Forecast / hackathon estimate",
+                                      "reason": f"{reason}; and no historical seasonal analogue: {why}"}) from None
+        return "analogue", setup
+
+    def estimate_planner(kind: str, setup):
+        if kind == "forecast":
+            return ForecastPlanner(hs.planner(), setup)
+        a = hs.archive()
+        return AnaloguePlanner(hs.analogue(), setup, drift_kwargs(a.params))
 
     def forecast_meta(a: HistoricalArchive, setup, snap, n_days: int, members: int, planner, **extra) -> dict:
-        fm = forecast_metadata(a, setup, snap, provenance(a, cfg, setup.analogue, n_days, snap, planner), members)
+        if isinstance(planner, AnaloguePlanner):
+            fm = analogue_metadata(planner.data, setup, snap, members, planner.data.days[-1])
+            banners = [FORECAST_BANNERS[0], "Historical seasonal analogue: real sea ice, winds and currents of "
+                       "earlier years", FORECAST_BANNERS[2]]
+        else:
+            fm = forecast_metadata(a, setup, snap, provenance(a, cfg, setup.analogue, n_days, snap, planner), members)
+            fm.update(pathway="proxy_forecast", pathway_label="Proxy forecast (analogue start)")
+            banners = FORECAST_BANNERS
         return {"mode": "forecast", "label": fm["label"], "execution_mode": FORECAST_EXECUTION_MODE,
                 "data_status": FORECAST_DATA_STATUS, "issue_date": setup.requested.isoformat(),
                 "requested_date": setup.requested.isoformat(), "hindsight_forcing": False,
-                "proxy_forcing": True, "forecast_disclosure": fm["disclosure"], "banners": FORECAST_BANNERS,
+                "proxy_forcing": True, "forecast_disclosure": fm["disclosure"], "banners": banners,
                 "disclaimer": DISCLAIMER, **extra, "forecast": fm}
 
     FORECAST_SIM_NOTE = (
@@ -490,6 +561,14 @@ def register(app: FastAPI, svc) -> HistoricalService:
         "the latest official USNIC list held at its last positions, calibrated drift) and the existing replanning "
         "rules decide whether to keep or change the route. Dates are shown on the requested timeline; the analogue "
         "dates are listed under Data & Confidence. Positions are the last route cell reached each day (25 km cells).")
+
+    ANALOGUE_SIM_NOTE = (
+        "Seasonal-analogue voyage simulation: the vessel sails the planned route one day at a time through the real "
+        "observed sea ice of the analogue date (an earlier year; a proxy, not an observation of the requested dates). "
+        "Each following day a new estimate is issued from the same analogue inputs (sea ice of the same calendar days "
+        "in other years, analogue ERA5/CMEMS reanalysis, the stated official USNIC list, calibrated drift) and the "
+        "existing replanning rules decide whether to keep or change the route. Dates are shown on the requested "
+        "timeline; the analogue dates are listed under Data & Confidence.")
 
     # Engine dates are analogue dates; these subtrees hold real-world dates and are never shifted.
     REAL_DATES = frozenset({"icebergs", "provenance", "analogue_date"})
@@ -514,14 +593,13 @@ def register(app: FastAPI, svc) -> HistoricalService:
         n_days = req.window_days + h
         ends_out = {"locations": {"origin": spec.origin.to_dict(), "destination": spec.destination.to_dict()},
                     "horizon": spec.horizon.to_dict()}
-        if is_forecast_date(hs.archive(), req.issue):
-            setup = forecast_setup(req.issue, n_days)
+        if req.issue > hs.archive().days[-1]:
+            kind, setup = estimate_setup(req.issue, n_days)
             with svc.inline_slot():
-                planner = ForecastPlanner(hs.planner(), setup)
+                planner = estimate_planner(kind, setup)
                 body, world, snap = plan_result(planner, setup.analogue, req.window_days, req.include_layers, o, d,
-                                                n_days, key=("forecast", tuple(o), tuple(d), req.issue,
-                                                             req.window_days))
-            a = planner.archive
+                                                n_days, key=(kind, tuple(o), tuple(d), req.issue, req.window_days))
+            a = hs.archive()
             meta = forecast_meta(a, setup, snap, n_days, world.n_scenarios, planner,
                                  window_days=req.window_days, horizon_days=h, scenario_days=n_days,
                                  n_scenarios=world.n_scenarios,
@@ -557,18 +635,18 @@ def register(app: FastAPI, svc) -> HistoricalService:
         spec = hs.route(req.origin, req.destination)
         o, d, h = *spec.cells, spec.horizon_days
         n_days = req.window_days + h
-        forecast = is_forecast_date(hs.archive(), req.issue)
-        setup = forecast_setup(req.issue, n_days) if forecast else None
+        forecast = req.issue > hs.archive().days[-1]
+        kind, setup = estimate_setup(req.issue, n_days) if forecast else (None, None)
         a = hs.archive() if forecast else coverage_or_422(req.issue, n_days)
         engine_issue = setup.analogue if forecast else req.issue
-        key = (("forecast", tuple(o), tuple(d), req.issue, req.window_days) if forecast
+        key = ((kind, tuple(o), tuple(d), req.issue, req.window_days) if forecast
                else (tuple(o), tuple(d), req.issue, req.window_days))
         to_engine = (lambda x: x - timedelta(days=setup.offset_days)) if forecast else (lambda x: x)  # noqa: E731
 
         def work():
             from antarctic_routing.simulation import VoyageSimulator
 
-            planner = ForecastPlanner(hs.planner(), setup) if forecast else hs.planner()
+            planner = estimate_planner(kind, setup) if forecast else hs.planner()
             r, p = cfg.routing, a.params
             with plan_cache_lock:
                 hit = plan_cache.get(key)
@@ -609,6 +687,10 @@ def register(app: FastAPI, svc) -> HistoricalService:
                 return {**base, "status": "not_simulated",
                         "reason": "the archive cannot issue the daily forecasts this voyage needs (" +
                                   " | ".join(gaps) + ")"}
+            if kind == "analogue" and (miss := planner.truth_missing(dep, sea_days + 1)):
+                return {**base, "status": "not_simulated",
+                        "reason": f"the analogue year has no observed sea ice on {', '.join(map(str, miss))} (missing "
+                                  "upstream), so the voyage cannot be sailed through it; the plan itself is unaffected"}
             policy = ReplanPolicy(r.risk_budget, r.risk_estimator, r.confidence)
             sim = VoyageSimulator(planner, svc.vessel, policy, r.risk_weights, r.connectivity, p["scenario_routes"],
                                   p["seed"], h).run(dep, cand.route, cand.evaluation, hit["risk"])
@@ -632,9 +714,14 @@ def register(app: FastAPI, svc) -> HistoricalService:
                 out["summary"]["notes"]["forecast_mode"] = (
                     "Forecast mode: the 'observed' sea ice sailed through and scored against is the analogue "
                     "season's real observation (a proxy, not the requested year), and icebergs are held at their "
-                    "last official report.")
+                    "last official report." if kind == "forecast" else
+                    "Seasonal analogue: the 'observed' sea ice sailed through and scored against is the real "
+                    f"observation of the analogue date's year ({setup.analogue.year}, a proxy, not the requested "
+                    "year); the plan's sea-ice members came from other years.")
                 out = shift_dates(out, setup.offset_days, REAL_DATES)
-                base["metadata"].update(departure_date=shown(dep).isoformat(), simulation_note=FORECAST_SIM_NOTE)
+                base["metadata"].update(departure_date=shown(dep).isoformat(),
+                                        simulation_note=FORECAST_SIM_NOTE if kind == "forecast"
+                                        else ANALOGUE_SIM_NOTE)
             else:
                 base["metadata"].update(departure_date=dep.isoformat(), simulation_note=note,
                                         provenance=provenance(a, cfg, req.issue, n_days, None, planner))

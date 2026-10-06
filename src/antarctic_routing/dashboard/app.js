@@ -73,9 +73,10 @@ function setModeBadge(tab) {
   else if (tab === "product") {
     const ok = st.historical && st.historical.status === "available";
     const fc = ok && typeof prodForecastShown === "function" && prodForecastShown();
+    const an = fc && prodAnalogueShown();
     status = !ok ? "unavailable" : fc ? "forecast" : "historical";
-    text = !ok ? "REAL HISTORICAL DATA UNAVAILABLE" : fc ? "FORECAST / HACKATHON ESTIMATE · PROXY INPUTS"
-      : "REAL HISTORICAL DATA · HINDSIGHT FORCING";
+    text = !ok ? "REAL HISTORICAL DATA UNAVAILABLE" : an ? "FORECAST / HACKATHON ESTIMATE · SEASONAL ANALOGUE"
+      : fc ? "FORECAST / HACKATHON ESTIMATE · PROXY INPUTS" : "REAL HISTORICAL DATA · HINDSIGHT FORCING";
   } else if (tab === "real") {
     const ok = st.real_data.status === "available";
     status = ok ? "historical" : "unavailable";
@@ -1103,8 +1104,12 @@ function labelledMode(m) {
 }
 
 function srcLabel(src) {
-  return src === "proxy_analogue_observed" ? "proxy: analogue-season observation" : (src || "–");
+  return src === "proxy_analogue_observed" ? "proxy: analogue-season observation" :
+    src === "analogue_observed" ? "historical analogue: observed in earlier years" : (src || "–");
 }
+
+// A forecast-mode result that came from a historical seasonal analogue (not the proxy forecast pathway).
+function isAnalogue(m) { return Boolean(m && m.mode === "forecast" && m.forecast && m.forecast.pathway === "seasonal_analogue"); }
 
 function obsWord(src) {
   return src === "proxy_analogue_observed" ? "proxy sea ice (analogue-season observation)" : "observed sea ice";
@@ -1163,58 +1168,71 @@ function forecastInfo() {
   return f && f.available && Array.isArray(f.dates) && f.dates.length ? f : null;
 }
 
-// "historical" when the real archive supports the date, "forecast" for a supported date after it, else null.
+// "historical" when the real archive supports the date, "forecast" for a date the forecast pathway lists,
+// "analogue" for any other date after the archive (a historical seasonal analogue estimate), else null.
 function dateMode(day) {
   if (!prod.dates || !day) return null;
   if ((prod.dates.window_dates || []).includes(day)) return "historical";
   const f = forecastInfo();
-  return f && f.dates.includes(day) ? "forecast" : null;
+  if (f && f.dates.includes(day)) return "forecast";
+  const e = prod.dates.estimate;
+  return e && e.analogue && e.analogue.available && /^\d{4}-\d{2}-\d{2}$/.test(day) && day > e.any_date_after ?
+    "analogue" : null;
 }
 
 // The product shows a forecast estimate: the plan on screen is one, or (before planning) the chosen date is one.
 function prodForecastShown() {
   try {
     if (prod.result) return prod.result.metadata.mode === "forecast";
-    return dateMode($("#pr-issue").value) === "forecast";
+    return ["forecast", "analogue"].includes(dateMode($("#pr-issue").value));
   } catch { return false; }      // called by the header badge before the product module has initialised
+}
+
+function prodAnalogueShown() {
+  try {
+    if (prod.result) return isAnalogue(prod.result.metadata);
+    return dateMode($("#pr-issue").value) === "analogue";
+  } catch { return false; }
 }
 
 function modeNote() {
   const mode = dateMode($("#pr-issue").value);
   if (!mode) return null;
-  return mode === "historical" ?
-    el("p", { class: "pr-note pr-mode historical", id: "pr-mode" }, el("span", { class: "pr-mode-badge" }, "REAL HISTORICAL DATA"),
-      " Past season, real archive with hindsight forcing.") :
-    el("p", { class: "pr-note pr-mode forecast", id: "pr-mode" }, el("span", { class: "pr-mode-badge" }, "FORECAST / HACKATHON ESTIMATE"),
-      " No observations exist for this date: proxy sea ice and forcing from an analogue season, latest official icebergs.");
+  if (mode === "historical") {
+    return el("p", { class: "pr-note pr-mode historical", id: "pr-mode" }, el("span", { class: "pr-mode-badge" }, "REAL HISTORICAL DATA"),
+      " Past season, real archive with hindsight forcing.");
+  }
+  return el("p", { class: "pr-note pr-mode forecast", id: "pr-mode" }, el("span", { class: "pr-mode-badge" }, "FORECAST / HACKATHON ESTIMATE"),
+    mode === "forecast" ? " No observations exist for this date: proxy sea ice and forcing from an analogue season, latest official icebergs." :
+      " Historical seasonal analogue: no forecast exists for this date, so real sea ice, winds and currents of the same " +
+      "calendar period in earlier years stand in. Not a prediction; the confidence is shown with the result.");
 }
 
 function dateNote() {
   const d = prod.dates;
   if (!d) return null;
   const dates = d.window_dates || [], f = forecastInfo();
-  if (!dates.length && !f) return el("p", { class: "pr-note bad" }, "No supported dates for this route.");
+  const e = d.estimate, anyLater = e && e.analogue && e.analogue.available;
+  if (!dates.length && !f && !anyLater) return el("p", { class: "pr-note bad" }, "No supported dates for this route.");
   return el("p", { class: "pr-note muted" }, (dates.length ? `Real historical dates for this route: ${dates.length} days ` +
     `between ${dates[0]} and ${dates[dates.length - 1]} (Nov–Feb seasons; some single days are missing upstream). ` : "") +
     (f ? `Forecast estimates: ${f.first} to ${f.last}. ` : "") +
+    (anyLater ? `Any other date after ${e.any_date_after}: historical seasonal analogue estimate. ` : "") +
     `Route horizon ${d.horizon_days} days, ${d.window_days_max}-day departure window.`);
 }
 
 // Why a date cannot be planned, from the server's lists only (the forecast range is forecast_mode's, not ours).
 function unsupportedDate(day) {
-  const d = prod.dates, dates = d.window_dates || [], f = forecastInfo(), fr = d.forecast || {};
+  const d = prod.dates, dates = d.window_dates || [], f = forecastInfo(), fr = d.forecast || {}, e = d.estimate || {};
   const hist = dates.length ? ` Real historical dates: ${dates[0]} to ${dates[dates.length - 1]}.` : "";
   const fcRange = f ? ` Forecast estimates: ${f.first} to ${f.last}.` : "";
-  if (dates.length && day <= dates[dates.length - 1]) {
-    return `No Real Historical Data for ${day} on this route (seasons run Nov–Feb, and some single days are ` +
-      `missing upstream).${hist}${fcRange}`;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return "Enter the date as YYYY-MM-DD.";
+  if (!e.any_date_after || day <= e.any_date_after) {
+    return `No Real Historical Data for ${day} on this route (past seasons run Nov–Feb, and some single days are ` +
+      `missing upstream).${hist} Any date after ${e.any_date_after || "the archive"} is accepted as an estimate.`;
   }
-  const month = Number(day.slice(5, 7));
-  if (month >= 3 && month <= 10) {
-    return `${day} is outside the Nov–Feb sea-ice season, so there is no forecast estimate for it.${fcRange || hist}`;
-  }
-  if (f) return `${day} is outside the forecast-estimate range for this route (${f.first} to ${f.last}).${hist}`;
-  return `No forecast estimate is available for this route${fr.reason ? `: ${fr.reason}` : "."}${hist}`;
+  const why = (e.analogue && e.analogue.reason) || fr.reason;
+  return `No estimate is available for ${day} on this route${why ? `: ${why}` : "."}${fcRange}${hist}`;
 }
 
 function formProblem() {
@@ -1250,7 +1268,7 @@ function refreshForm() {
 
 // The default demonstration date: the 2026-11-19 forecast estimate when forecast_mode supports it on this
 // route, else the frozen 2023-11-14 replay, else the first supported date. A UI default only.
-const DEMO_FORECAST_DATE = "2026-11-19", DEMO_HISTORICAL_DATE = "2023-11-14";
+const DEMO_FORECAST_DATE = "2026-11-19", DEMO_HISTORICAL_DATE = "2023-11-14", DEMO_ANALOGUE_DATE = "2027-08-14";
 function defaultDate(dates, seasons, fc) {
   if (fc && fc.dates.includes(DEMO_FORECAST_DATE)) return DEMO_FORECAST_DATE;
   if (dates.includes(DEMO_HISTORICAL_DATE)) return DEMO_HISTORICAL_DATE;
@@ -1261,6 +1279,7 @@ function defaultDate(dates, seasons, fc) {
 // Two one-click examples under the date, each shown only when the server lists that date for this route.
 function renderExamples() {
   const box = $("#pr-examples"), opts = [[DEMO_FORECAST_DATE, "19 Nov 2026 (forecast)"],
+    [DEMO_ANALOGUE_DATE, "14 Aug 2027 (seasonal analogue)"],
     [DEMO_HISTORICAL_DATE, "14 Nov 2023 (historical)"]].filter(([d]) => dateMode(d));
   box.hidden = !opts.length;
   box.replaceChildren(...(opts.length ? ["Try: ", ...opts.flatMap(([d, label], k) => [k ? " · " : "",
@@ -1290,10 +1309,10 @@ async function loadProductDates() {
     const input = $("#pr-issue"), dates = d.window_dates || [];
     const seasons = (d.seasons && d.seasons.window) || [];
     const fc = forecastInfo();
-    if (dates.length || fc) {
-      input.min = dates.length ? dates[0] : fc.first;
-      input.max = fc ? fc.last : dates[dates.length - 1];
-    }
+    // No min/max: any calendar date can be typed or picked; the server decides how it is planned (historical,
+    // forecast pathway or historical seasonal analogue) and an unsupported date is explained, never clamped.
+    input.removeAttribute("min");
+    input.removeAttribute("max");
     // A date the person typed or picked stays as it is (an unsupported one is explained, not replaced);
     // until then the page shows the default demonstration date.
     if (!prod.dateChosen || !input.value) {
@@ -1301,7 +1320,7 @@ async function loadProductDates() {
       if (def && (!input.value || !dateMode(input.value))) input.value = def;
     }
     renderExamples();
-    input.disabled = !dates.length && !fc;
+    input.disabled = false;
   } catch (e) {
     if (prod.datesKey !== key) return;
     prod.datesKey = null;
@@ -1837,7 +1856,46 @@ function renderWindow(p) {
   }));
 }
 
+// Seasonal-analogue result: every input with its real dates (Data & Confidence).
+function renderAnalogueData(p) {
+  const m = p.metadata, fc = m.forecast, map = fc.date_mapping, sea = fc.sea_ice, f = fc.forcing, b = fc.icebergs;
+  const c = fc.confidence || {}, yrs = sea.member_years || [];
+  $("#pr-data-modes").replaceChildren(...[
+    ["forecastMode", "Mode", `${m.label} for ${m.requested_date}: historical seasonal analogue. No observation or ` +
+      "forecast exists for this date; not live and not a prediction."],
+    ["proxy", "Sea ice (analogue)", `Real ${sea.source} observations of the same calendar days in ${yrs.at(-1)}–${yrs[0]} ` +
+      `(${yrs.length} years, ±${sea.day_shifts[1]} days: ${sea.distinct_sequences} sequences, ${sea.members} members). No model.`],
+    ["proxy", "Winds & currents (analogue)", `${f.winds.product} and ${f.currents.product} of ${f.winds.dates_used[0]} to ` +
+      `${f.winds.dates_used[1]}: historical reanalysis analogue, not a forecast.`],
+    [b.kind === "recent_official" ? "observation" : "proxy", "Icebergs", `${b.source} list of ${b.snapshot_date} ` +
+      (b.kind === "recent_official" ? `(${b.age_days_at_requested_date} d before the requested date), ` :
+        `(${b.age_days_at_analogue_date} d before the analogue date), `) + `${b.n_in_grid} of ${b.n_source_bergs} in the grid, ` +
+      (b.kind === "recent_official" ? "held at their last reported position, then calibrated drift." :
+        "the analogue year's official positions, then calibrated drift.")],
+    ["derived", "Confidence", `${(c.level || "low").toUpperCase()}: ${(c.caveats || []).join(" ")}`],
+    ["research", "Use", "Research / hackathon estimate, not certified navigation."],
+  ].map(([kind, k, v]) => el("li", {}, kindBadge(kind), el("span", { class: "src-name" }, k), el("span", {}, v))));
+  $("#pr-data-inputs tbody").replaceChildren(...kv([
+    ["Requested date", `${m.requested_date} (after the archive, which ends ${fc.archive_last_date})`],
+    ["Why an analogue", fc.pathway_reason || "the forecast pathway cannot serve this date"],
+    ["Observations for the requested dates", fc.observations_for_requested_dates],
+    ["Analogue date", `${fc.analogue_date}; engine days ${map.engine_days[0]} to ${map.engine_days[1]} shown as ` +
+      `${map.shown_as[0]} to ${map.shown_as[1]} (offset ${map.offset_days} d)`],
+    ["Sea-ice members", (sea.member_windows || []).filter((w) => w.shift_days === 0)
+      .map((w) => `${w.first} – ${w.last}`).join("; ") + ` (each also shifted ${sea.day_shifts[0]}…+${sea.day_shifts[1]} d)`],
+    ["Off-season sea-ice files", (sea.off_season_files || []).map((x) => `${x.file} (${short(x.sha256)})`).join(", ") || "–"],
+    ["Winds", `${f.status}: ${(f.winds.files || []).map((x) => x.file).join(", ")}`],
+    ["Currents", `${f.status}: ${(f.currents.files || []).map((x) => x.file).join(", ")}`],
+    ["Icebergs", `${b.status}: ${b.file} (${short(b.sha256)}); ${(b.ids_in_grid || []).join(", ") || "none in the grid"}`],
+    ["Drift", `${b.drift_model.model}: beta ${b.drift_model.beta}, alpha scale ${b.drift_model.alpha_scale}, ` +
+      `spread factor ${b.drift_model.spread_factor}, ${b.drift_model.members} members`],
+    ["Sea-ice spread across years", Object.entries((c.sea_ice_spread || {}).mean_concentration_by_year || {})
+      .map(([y, v]) => `${y}: ${pct(v, 0)}`).join(", ") || "–"],
+  ]));
+}
+
 function renderForecastData(p) {
+  if (isAnalogue(p.metadata)) return renderAnalogueData(p);
   const m = p.metadata, fc = m.forecast, map = fc.date_mapping, sea = fc.sea_ice, f = fc.forcing, b = fc.icebergs;
   const model = (fc.sea_ice_forecast && fc.sea_ice_forecast.model) || {};
   $("#pr-data-modes").replaceChildren(...[
@@ -1875,7 +1933,7 @@ function renderData(p) {
     $(id).textContent = forecast ? m.forecast_disclosure : m.hindsight_disclosure;
   }
   $("#pr-disclosure").classList.toggle("forecast", forecast);
-  $("#pr-data-badge").textContent = forecast ? "Forecast estimate" : "Historical";
+  $("#pr-data-badge").textContent = forecast ? (isAnalogue(m) ? "Seasonal analogue estimate" : "Forecast estimate") : "Historical";
   $("#pr-data-badge").className = "badge " + (forecast ? "status-forecast" : "status-historical");
   $("#pr-banners").replaceChildren(...(m.banners || []).map((b) => el("span", { class: "pr-banner" }, b)),
     el("button", { type: "button", class: "pr-link", id: "pr-open-data" }, "Data & Confidence →"));
@@ -1900,7 +1958,8 @@ function renderData(p) {
     ...locRows("Origin", p.locations.origin), ...locRows("Destination", p.locations.destination),
     ["Route horizon", `${p.horizon?.horizon_days ?? m.horizon_days} days (great circle ${num(p.horizon?.great_circle_km)} km)`],
     ["Scenario days", `${m.scenario_days} (${m.window_days}-day window + horizon)`],
-    ["Season", forecast ? `analogue ${m.forecast.date_mapping.analogue_season} (proxy start; see inputs)` :
+    ["Season", isAnalogue(m) ? `historical seasonal analogue of ${m.forecast.analogue_date} (see inputs)` :
+      forecast ? `analogue ${m.forecast.date_mapping.analogue_season} (proxy start; see inputs)` :
       s ? `${s.season} · ${s.out_of_sample ? "out-of-sample for the U-Net and drift calibration" :
       "in-sample: " + (s.in_sample_notes || []).join("; ")}` +
       `${s.independent_evaluation ? " · independent evaluation season: " + (s.evaluation_notes || []).join("; ") : ""}`
@@ -1926,6 +1985,26 @@ function renderHowto(p) {
   const fc = m.forecast, map = fc.date_mapping, sea = fc.sea_ice, f = fc.forcing, b = fc.icebergs;
   const model = (fc.sea_ice_forecast && fc.sea_ice_forecast.model) || {}, year = m.requested_date.slice(0, 4);
   const span = (d) => `${fmtDay(d[0])} – ${fmtDay(d[1])} ${d[1].slice(0, 4)}`;
+  card.classList.toggle("analogue", isAnalogue(m));
+  if (isAnalogue(m)) {
+    const c = fc.confidence || {}, yrs = sea.member_years || [];
+    $("#pr-howto-list").replaceChildren(...[
+      ["Method", "Historical seasonal analogue (no forecast exists for this date)."],
+      ["Analogue date", `${fmtDay(fc.analogue_date)} ${fc.analogue_date.slice(0, 4)}`],
+      ["Wind/current forcing", `historical reanalysis analogue (${f.winds.product}, ${f.currents.product} of ` +
+        `${span(f.winds.dates_used)})`],
+      ["Iceberg source", `official USNIC list of ${fmtDay(b.snapshot_date)} ${b.snapshot_date.slice(0, 4)} ` +
+        (b.kind === "recent_official" ? `(latest list, ${b.age_days_at_requested_date} days before departure)` :
+          "(the analogue year's list; no list within 120 days of departure)") +
+        `; ${b.n_in_grid} of ${b.n_source_bergs} bergs in the area, calibrated drift.`],
+      ["Sea ice", `real OSI SAF observations of the same calendar days in ${yrs.at(-1)}–${yrs[0]} ` +
+        `(${yrs.length} years, ±${sea.day_shifts[1]} days); no model. Not ${year} observations.`],
+      ["Confidence", `${(c.level || "low").toUpperCase()}. ${(c.caveats || []).slice(2).join(" ") ||
+        "Risk is how often the route met hazards across the analogue years, not a calibrated probability."}`],
+      ["Result", "hackathon research estimate, not certified navigation."],
+    ].map(([k, v]) => el("li", { "data-k": k }, el("b", {}, k), " ", v)));
+    return;
+  }
   $("#pr-howto-list").replaceChildren(...[
     ["Sea ice", `historical analogue start (real OSI SAF observations of ${span(sea.observed_window_used)}, ` +
       `season ${map.analogue_season}) + frozen U-Net forecast ${model.id || ""}. Proxy, not ${year} observations.`],
@@ -1940,8 +2019,9 @@ $("#pr-howto-more").addEventListener("click", () => openTab(primaryButton("data"
 
 // Data & Confidence: sources and method, filled from the result's metadata when there is one.
 function renderDataGeneral(p) {
-  const m = p && p.metadata, fc = m && m.mode === "forecast" ? m.forecast : null;
-  const h = m ? (fc ? fc.engine_provenance || {} : m.provenance || {}) : {};
+  const m = p && p.metadata;
+  const an = isAnalogue(m) ? m.forecast : null, fc = m && m.mode === "forecast" && !an ? m.forecast : null;
+  const h = m ? (fc ? fc.engine_provenance || {} : an ? {} : m.provenance || {}) : {};
   const sea = h.sea_ice || {}, model = h.forecast_model || {}, f = h.forcing || {}, b = h.icebergs || {};
   const par = h.parameters || {}, risk = p && p.risk;
   const item = (kind, k, v) => el("li", {}, kindBadge(kind), el("span", { class: "src-name" }, k), el("span", {}, v));
@@ -1967,6 +2047,21 @@ function renderDataGeneral(p) {
       `${fc.forcing.currents.dates_used.join(" – ")}: proxy, not a forecast.` : `${f.currents?.product || "CMEMS daily reanalysis"}` +
       `${files(f.currents)}: hindsight reanalysis of the voyage days.`),
   );
+  if (an) {
+    const yrs = an.sea_ice.member_years || [], ib = an.icebergs;
+    $("#pr-data-sources").replaceChildren(
+      item("proxy", "OSI SAF sea ice", `Real daily 25 km observations of the same calendar days in ${yrs.at(-1)}–${yrs[0]} ` +
+        `(±${an.sea_ice.day_shifts[1]} days), used as a historical seasonal analogue; not observations of ` +
+        `${m.requested_date.slice(0, 4)}. No sea-ice model is run.`),
+      item(ib.kind === "recent_official" ? "observation" : "proxy", "USNIC icebergs", `Official list of ${ib.snapshot_date}` +
+        (ib.kind === "recent_official" ? ", held at the last reported positions until departure, then drifted." :
+          " (the analogue year's positions; no list within 120 days of departure), then drifted.")),
+      item("proxy", "ERA5 winds", `${an.forcing.winds.product} of ${an.forcing.winds.dates_used.join(" – ")}: historical ` +
+        "reanalysis analogue, not a forecast."),
+      item("proxy", "Copernicus Marine (CMEMS) currents", `${an.forcing.currents.product} of ` +
+        `${an.forcing.currents.dates_used.join(" – ")}: historical reanalysis analogue, not a forecast.`),
+    );
+  }
   const n = m ? m.n_scenarios : par.members, bud = risk ? risk.risk_budget : budget();
   $("#pr-data-method").replaceChildren(
     item("model", "Sea-ice forecasting", "The residual U-Net forecasts the change in daily sea-ice concentration " +
@@ -1989,8 +2084,13 @@ function renderDataGeneral(p) {
     ...(fc ? [item("proxy", "Forecast mode", `Dates after the archive (${fc.archive_last_date}) start from the ` +
       `same calendar day of ${fc.date_mapping.analogue_season} (${fc.date_mapping.offset_days} days earlier) and are ` +
       "shown on the requested dates. Research/hackathon estimate, not certified navigation.")] : []),
+    ...(an ? [item("proxy", "Historical seasonal analogue", `Dates after the archive (${an.archive_last_date}) that the ` +
+      "forecast pathway cannot serve are estimated from earlier years: each of the scenarios takes the real observed sea " +
+      `ice of the same calendar days in one of ${an.sea_ice.member_years.length} earlier years (±${an.sea_ice.day_shifts[1]} ` +
+      `days), with the winds and currents of ${an.analogue_date}. The U-Net is not used. Risk is how often the route met ` +
+      "hazards across those years, not a calibrated probability.")] : []),
   );
-  const shown = m ? (fc ? "forecast" : "historical") : null;
+  const shown = m ? (an ? "analogue" : fc ? "forecast" : "historical") : null;
   const mark = (k) => (shown === k ? " (this result)" : "");
   $("#pr-data-modes-general").replaceChildren(
     item("historicalMode", "Real Historical Data" + mark("historical"), "A past departure date inside the archive " +
@@ -2000,6 +2100,10 @@ function renderDataGeneral(p) {
       "server lists for the route. The same engine runs from an analogue season: proxy sea ice and ERA5/CMEMS forcing " +
       "of the same calendar days, plus the latest official USNIC iceberg list. No observation of the future year is " +
       "used. Not a real forecast and not certified navigation."),
+    item("forecastMode", "Forecast / hackathon estimate: historical seasonal analogue" + mark("analogue"), "Any other " +
+      "date after the archive, in any month or year. Real sea ice of the same calendar days in earlier years, the " +
+      "ERA5/CMEMS reanalysis of the analogue date, and the latest official USNIC list (or the analogue year's list when " +
+      "none is recent). Every date used is listed; a confidence level and its caveats come with the result."),
   );
   // General limitations without a plan; with one, the result's own limitations (from the API) are shown below.
   $("#pr-data-limits-general-wrap").hidden = Boolean(m);
@@ -2116,7 +2220,8 @@ function renderSimulation() {
   const m = s.metadata, o = s.locations.origin, d = s.locations.destination;
   $("#sim-banners").replaceChildren(...(m.banners || []).map((b) => el("span", { class: "pr-banner" }, b)));
   $("#sim-disclosure").textContent = m.mode === "forecast" ? m.forecast_disclosure + " The ice sailed through is the " +
-    "analogue season's real observation (proxy); this is not live vessel tracking." :
+    (isAnalogue(m) ? `real observation of the analogue date's year (${m.forecast.analogue_date.slice(0, 4)}; proxy)` :
+      "analogue season's real observation (proxy)") + "; this is not live vessel tracking." :
     m.hindsight_disclosure + " This is a replay of a past season, not live vessel tracking.";
   $("#sim-disclosure").classList.toggle("forecast", m.mode === "forecast");
   $("#sim-ramp-label").textContent = m.mode === "forecast" ? "100% proxy (analogue-season) sea-ice concentration" :

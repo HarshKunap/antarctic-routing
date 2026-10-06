@@ -323,8 +323,9 @@ test("locations come from GET /real/locations and dates from the route's support
   assert.equal(await page.inputValue("#pr-destination"), "bravo");
   const d = calls.find((c) => c.path === "/real/historical/dates" && c.search);
   assert.equal(d.search, "?origin=alpha&destination=bravo");
-  assert.equal(await page.getAttribute("#pr-issue", "min"), DATES[0]);
-  assert.equal(await page.getAttribute("#pr-issue", "max"), DATES.at(-1));
+  // The date has no min/max (any calendar date can be chosen); the supported list decides how it is planned.
+  assert.equal(await page.getAttribute("#pr-issue", "min"), null);
+  assert.equal(await page.getAttribute("#pr-issue", "max"), null);
   assert.equal(await page.inputValue("#pr-issue"), "2023-11-14");
   await page.close();
 });
@@ -742,7 +743,7 @@ test("an additional season from the archive is selectable with its evaluation la
   await page.fill("#pr-issue", "2024-11-14");
   await page.dispatchEvent("#pr-issue", "change");
   assert.match(await text(page, "#pr-mode"), /REAL HISTORICAL DATA/);
-  assert.equal(await page.getAttribute("#pr-issue", "max"), "2024-11-16");
+  assert.equal(await page.getAttribute("#pr-issue", "max"), null);
   await page.click("#pr-submit");
   await page.waitForSelector("#pr-result:not([hidden])");
   assert.equal(bodies.length, 1);
@@ -876,6 +877,41 @@ function makeForecastPlan() {
   return p;
 }
 
+const anDates = { ...fcDates, estimate: { any_date_after: "2025-02-28", label: "Forecast / hackathon estimate",
+  pathways: { proxy_forecast: "listed", seasonal_analogue: "every other date" },
+  analogue: { available: true, reason: null, label: "Historical seasonal analogue" } } };
+
+function makeAnaloguePlan() {
+  const p = makeForecastPlan();
+  const years = [2023, 2022, 2021, 2020, 2019, 2018, 2017];
+  const fc = p.metadata.forecast;
+  p.metadata.requested_date = p.metadata.issue_date = "2027-08-14";
+  p.metadata.banners = ["FORECAST / HACKATHON ESTIMATE", "Historical seasonal analogue: real sea ice, winds and currents of earlier years",
+    "Research estimate, not certified navigation"];
+  p.metadata.layer_source = ["analogue_observed", "analogue_observed"];
+  p.metadata.forecast = { ...fc, pathway: "seasonal_analogue", pathway_label: "Historical seasonal analogue",
+    pathway_reason: "stand-in reason", requested_date: "2027-08-14", analogue_date: "2024-08-14",
+    date_mapping: { analogue_start_date: "2024-08-14", analogue_season: "2024 (outside the Nov-Feb archive seasons)",
+      offset_days: 1095, engine_days: ["2024-08-14", "2024-09-02"], shown_as: ["2027-08-14", "2027-09-02"] },
+    sea_ice: { status: "historical_analogue_ensemble", member_years: years, day_shifts: [-7, 7], distinct_sequences: 105,
+      members: 200, source: "OSI SAF OSI-450-a / OSI-430-a daily sea-ice concentration, 25 km",
+      member_windows: years.map((y) => ({ year: y, shift_days: 0, first: `${y}-08-14`, last: `${y}-09-02` })),
+      off_season_files: [{ file: "sea_ice_25km_offseason_2023_mar_oct.nc", sha256: "aa".repeat(32) }] },
+    forcing: { status: "historical_reanalysis_analogue", winds: { product: "ERA5 daily reanalysis", dates_used: ["2024-08-14", "2024-09-02"],
+      files: [] }, currents: { product: "CMEMS GLOBAL reanalysis daily", dates_used: ["2024-08-14", "2024-09-02"], files: [] } },
+    icebergs: { ...fc.icebergs, kind: "analogue_year", status: "analogue_year_snapshot", snapshot_date: "2024-08-09",
+      age_days_at_requested_date: 1100, age_days_at_analogue_date: 5, file: "AntarcticIcebergs_20240809.csv" },
+    confidence: { level: "low", member_years: years, caveats: ["Not a forecast: stand-in.", "Risk percentages: stand-in.",
+      "No official iceberg list falls within 120 days of the requested date: stand-in."],
+      sea_ice_spread: { mean_concentration_by_year: { 2023: 0.21, 2022: 0.24 }, min: 0.21, max: 0.24, range: 0.03 } },
+    limitations: ["Seasonal analogue: stand-in limitation."] };
+  delete p.metadata.forecast.sea_ice_forecast;
+  delete p.metadata.forecast.engine_provenance;
+  p.daily[0].layer_source = "analogue_observed";
+  p.layers.layers[0].source = "analogue_observed";
+  return p;
+}
+
 test("a future date is offered as a labelled forecast estimate and planned through the same call", { skip }, async () => {
   const bodies = [];
   const { page, errors } = await openDashboard(browser, { dates: fcDates,
@@ -886,7 +922,9 @@ test("a future date is offered as a labelled forecast estimate and planned throu
   assert.match(await text(page, "#pr-mode"), /FORECAST \/ HACKATHON ESTIMATE[\s\S]*proxy/);
   // No season list in the product: the date is the only control; the examples come from the server's lists.
   assert.equal(await page.locator("#pr-season").count(), 0);
-  assert.equal(await page.getAttribute("#pr-issue", "max"), "2026-11-19");
+  // No min/max on the date: any calendar date can be chosen; the server decides how it is planned.
+  assert.equal(await page.getAttribute("#pr-issue", "max"), null);
+  assert.equal(await page.getAttribute("#pr-issue", "min"), null);
   assert.match(await text(page, "#pr-examples"), /Try: 19 Nov 2026 \(forecast\) · 14 Nov 2023 \(historical\)/);
   await page.click('#pr-examples [data-date="2023-11-14"]');
   assert.equal(await page.inputValue("#pr-issue"), "2023-11-14");
@@ -930,12 +968,14 @@ test("a future date is offered as a labelled forecast estimate and planned throu
   await page.close();
 });
 
-test("a date outside both the archive and the forecast range is refused with a reason", { skip }, async () => {
-  const { page, planCalls } = await openDashboard(browser, { dates: fcDates });
+test("a later date is refused with the server's reason when no seasonal analogue is available", { skip }, async () => {
+  const blocked = { ...anDates, estimate: { ...anDates.estimate, analogue: { available: false,
+    reason: "blocked: no off-season inputs are listed for the seasonal analogue" } } };
+  const { page, planCalls } = await openDashboard(browser, { dates: blocked });
   await ready(page);
   await page.fill("#pr-issue", "2026-12-25");
   await page.dispatchEvent("#pr-issue", "change");
-  assert.match(await text(page, "#pr-notes"), /2026-12-25 is outside the forecast-estimate range for this route \(2026-11-14 to 2026-11-19\)/);
+  assert.match(await text(page, "#pr-notes"), /No estimate is available for 2026-12-25 on this route: blocked: no off-season inputs/);
   assert.ok(await page.locator("#pr-submit").isDisabled());
   assert.equal(planCalls().length, 0);
   await page.close();
@@ -966,23 +1006,72 @@ test("without 2026-11-19 in the forecast range the default stays the historical 
   await page.close();
 });
 
-for (const [day, expect] of [
-  ["2025-11-14", /2025-11-14 is outside the forecast-estimate range for this route \(2026-11-14 to 2026-11-19\)/],
-  ["2026-11-17", /2026-11-17 is outside the forecast-estimate range/],
-  ["2026-06-01", /2026-06-01 is outside the Nov–Feb sea-ice season, so there is no forecast estimate[\s\S]*2026-11-14 to 2026-11-19/],
-]) {
-  test(`an unsupported future date is explained, not replaced or planned: ${day}`, { skip }, async () => {
-    const { page, planCalls } = await openDashboard(browser, { dates: fcDates });
+for (const day of ["2026-12-15", "2027-01-20", "2027-02-15", "2027-08-14", "2028-03-03", "2030-08-14", "2025-11-14", "2026-06-01"]) {
+  test(`any future date is accepted as an estimate, never clamped or replaced: ${day}`, { skip }, async () => {
+    const { page, planCalls } = await openDashboard(browser, { dates: anDates });
     await ready(page);
     await page.fill("#pr-issue", day);
     await page.dispatchEvent("#pr-issue", "change");
-    assert.match(await text(page, "#pr-notes"), expect);
     assert.equal(await page.inputValue("#pr-issue"), day);
-    assert.ok(await page.isDisabled("#pr-submit"));
+    assert.match(await text(page, "#pr-mode"), /FORECAST \/ HACKATHON ESTIMATE[\s\S]*Historical seasonal analogue/);
+    assert.doesNotMatch(await text(page, "#pr-notes"), /outside|No estimate|No Real Historical Data/);
+    assert.ok(await page.isEnabled("#pr-submit"));
     assert.equal(planCalls().length, 0);
     await page.close();
   });
 }
+
+test("a past date outside the archive is still explained and not planned", { skip }, async () => {
+  const { page, planCalls } = await openDashboard(browser, { dates: anDates });
+  await ready(page);
+  await page.fill("#pr-issue", "2024-06-01");
+  await page.dispatchEvent("#pr-issue", "change");
+  assert.match(await text(page, "#pr-notes"), /No Real Historical Data for 2024-06-01[\s\S]*Any date after 2025-02-28 is accepted/);
+  assert.ok(await page.isDisabled("#pr-submit"));
+  assert.equal(planCalls().length, 0);
+  await page.close();
+});
+
+test("a seasonal-analogue estimate discloses the method, analogue date, forcing, icebergs and confidence", { skip }, async () => {
+  const bodies = [];
+  const { page, errors } = await openDashboard(browser, { dates: anDates,
+    plan: (b) => { bodies.push(b); return { status: 200, body: makeAnaloguePlan() }; } });
+  await ready(page);
+  assert.match(await text(page, "#pr-examples"), /14 Aug 2027 \(seasonal analogue\)/);
+  await page.click('#pr-examples [data-date="2027-08-14"]');
+  assert.equal(await page.inputValue("#pr-issue"), "2027-08-14");
+  assert.match(await text(page, "#pr-notes"), /Any other date after 2025-02-28: historical seasonal analogue estimate/);
+  assert.match(await text(page, "#mode-badge"), /FORECAST \/ HACKATHON ESTIMATE · SEASONAL ANALOGUE/);
+  await page.click("#pr-submit");
+  await page.waitForSelector("#pr-result:not([hidden])");
+  assert.equal(bodies[0].issue, "2027-08-14");
+  assert.match(await text(page, "#mode-badge"), /SEASONAL ANALOGUE/);
+  assert.match(await text(page, "#pr-banners"), /FORECAST \/ HACKATHON ESTIMATE[\s\S]*Historical seasonal analogue/i);
+  const how = await text(page, "#pr-howto");
+  assert.match(how, /Method Historical seasonal analogue/);
+  assert.match(how, /Analogue date \w+, 14 Aug 2024/);
+  assert.match(how, /Wind\/current forcing historical reanalysis analogue/);
+  assert.match(how, /Iceberg source official USNIC list of [\s\S]*2024 \(the analogue year's list/);
+  assert.match(how, /Sea ice real OSI SAF observations of the same calendar days in 2017–2023/);
+  assert.match(how, /Confidence LOW/);
+  assert.doesNotMatch(how, /U-Net/);
+  await page.click("#pr-howto-more");
+  const modes = await page.locator("#pr-data-modes").innerText();
+  assert.match(modes, /historical seasonal analogue/);
+  assert.match(modes, /Sea ice \(analogue\)[\s\S]*2017–2023[\s\S]*No model/);
+  assert.match(modes, /Confidence[\s\S]*LOW/);
+  assert.match(modes, /list of 2024-08-09 \(5 d before the analogue date\)/);
+  assert.doesNotMatch(modes, /undefined/);
+  const inputs = await page.locator("#pr-data-inputs").innerText();
+  assert.match(inputs, /Analogue date\s*2024-08-14/);
+  assert.match(inputs, /Sea-ice members[\s\S]*2023-08-14 – 2023-09-02/);
+  assert.match(inputs, /Why an analogue\s*stand-in reason/);
+  assert.match(await text(page, "#pr-data-badge"), /Seasonal analogue estimate/);
+  assert.match(await text(page, "#pr-data-modes-general"), /historical seasonal analogue \(this result\)/);
+  assert.match(await text(page, "#pr-data-sources"), /same calendar days in 2017–2023[\s\S]*No sea-ice model is run/);
+  assert.deepEqual(errors, []);
+  await page.close();
+});
 
 test("a forecast_unavailable refusal from the server is shown in words", { skip }, async () => {
   const { page } = await openDashboard(browser, { dates: fcDates, plan: () => ({ status: 422,
@@ -1137,6 +1226,56 @@ test("real smoke: a future date (2026-11-19) plans and simulates as a labelled f
   await page.click("#pr-simulate");
   await page.waitForSelector("#sim-body:not([hidden])", { timeout: 220000 });
   assert.match(await text(page, "#sim-slider-out"), /2026-11-19 \(0 of 2\)/);
+  assert.match(await text(page, "#sim-banners"), /FORECAST \/ HACKATHON ESTIMATE/);
+  assert.ok(!(await text(page, "#sim-banners")).includes("HISTORICAL MODE"));
+  await page.close();
+});
+
+test("real smoke: 14 Aug 2027 is accepted as a historical seasonal analogue and says why it is not recommended", {
+  skip: skip || (SMOKE ? false : "set ANTROUTE_SMOKE_URL to run against a live API with the real archive"), timeout: 480000,
+}, async () => {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  await page.goto(SMOKE);
+  await ready(page);
+  await page.selectOption("#pr-origin", "drake_passage");
+  await page.selectOption("#pr-destination", "bransfield_strait");
+  await ready(page);
+  assert.equal(await page.getAttribute("#pr-issue", "max"), null);
+  assert.equal(await page.getAttribute("#pr-issue", "min"), null);
+  await page.fill("#pr-issue", "2027-08-14");
+  await page.dispatchEvent("#pr-issue", "change");
+  assert.match(await text(page, "#pr-mode"), /FORECAST \/ HACKATHON ESTIMATE[\s\S]*seasonal analogue/i);
+  await page.click("#pr-submit");
+  await page.waitForSelector("#pr-result:not([hidden])", { timeout: 220000 });
+  assert.match(await text(page, "#pr-verdict-badge"), /Not recommended/);
+  assert.match(await text(page, "#pr-banners"), /FORECAST \/ HACKATHON ESTIMATE[\s\S]*Historical seasonal analogue/i);
+  const how = await text(page, "#pr-howto");
+  assert.match(how, /Analogue date \w+, 14 Aug 2024/);
+  assert.match(how, /Wind\/current forcing historical reanalysis analogue/);
+  assert.match(how, /Iceberg source official USNIC list of \w+, 8 Aug 2024/);
+  assert.match(how, /Confidence VERY LOW/);
+  await page.close();
+});
+
+test("real smoke: 3 Mar 2028 plans and simulates from a historical seasonal analogue", {
+  skip: skip || (SMOKE ? false : "set ANTROUTE_SMOKE_URL to run against a live API with the real archive"), timeout: 480000,
+}, async () => {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  await page.goto(SMOKE);
+  await ready(page);
+  await page.selectOption("#pr-origin", "drake_passage");
+  await page.selectOption("#pr-destination", "bransfield_strait");
+  await ready(page);
+  await page.fill("#pr-issue", "2028-03-03");
+  await page.dispatchEvent("#pr-issue", "change");
+  await page.click("#pr-submit");
+  await page.waitForSelector("#pr-result:not([hidden])", { timeout: 220000 });
+  assert.match(await text(page, "#pr-verdict-badge"), /Recommended/);
+  assert.match(await text(page, "#pr-metrics"), /3 Mar 2028, 00:00 UTC/);
+  assert.match(await text(page, "#pr-howto"), /Analogue date \w+, 3 Mar 2024/);
+  await page.click("#pr-simulate");
+  await page.waitForSelector("#sim-body:not([hidden])", { timeout: 220000 });
+  assert.match(await text(page, "#sim-slider-out"), /2028-03-03 \(0 of 2\)/);
   assert.match(await text(page, "#sim-banners"), /FORECAST \/ HACKATHON ESTIMATE/);
   assert.ok(!(await text(page, "#sim-banners")).includes("HISTORICAL MODE"));
   await page.close();

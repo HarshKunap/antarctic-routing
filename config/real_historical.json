@@ -782,6 +782,296 @@
         "sha256": "f512ce937a1a78f37acd5bbf513a35d6104c477728664a2fdf264110555e7507",
         "date": "2026-10-01"
       }
+    ],
+    "analogue_sea_ice": [
+      {
+        "path": "seasonal-analogue/sea-ice/processed/sea_ice_25km_offseason_2017_mar_oct.nc",
+        "sha256": "ce4943d36a351c7a2849a8e07dabe95a42e03d35137e44b3aaba86a9ca011608",
+        "first": "2017-03-01",
+        "last": "2017-10-31",
+        "season": 2017,
+        "source": "OSI SAF OSI-450-a v3.0 (Sea Ice Concentration Climate Data Record v3) daily sea-ice concentration, 25 km",
+        "provenance": "seasonal-analogue/PROVENANCE-seasonal-analogue.json"
+      },
+      {
+        "path": "seasonal-analogue/sea-ice/processed/sea_ice_25km_offseason_2018_mar_oct.nc",
+        "sha256": "0c6310cbac38a803f84bbfecdb272e6e29e07e53c1b6c2bf44df100e47af448c",
+        "first": "2018-03-01",
+        "last": "2018-10-31",
+        "season": 2018,
+        "source": "OSI SAF OSI-450-a v3.0 (Sea Ice Concentration Climate Data Record v3) daily sea-ice concentration, 25 km",
+        "provenance": "seasonal-analogue/PROVENANCE-seasonal-analogue.json"
+      },
+      {
+        "path": "seasonal-analogue/sea-ice/processed/sea_ice_25km_offseason_2019_mar_oct.nc",
+        "sha256": "0f459fad488382a5074e2bad31bf705cd1cdb38e3ce2102ae3c6352d547dd5dd",
+        "first": "2019-03-01",
+        "last": "2019-10-31",
+        "season": 2019,
+        "source": "OSI SAF OSI-450-a v3.0 (Sea Ice Concentration Climate Data Record v3) daily sea-ice concentration, 25 km",
+        "provenance": "seasonal-analogue/PROVENANCE-seasonal-analogue.json"
+      },
+      {
+        "path": "seasonal-analogue/sea-ice/processed/sea_ice_25km_offseason_2020_mar_oct.nc",
+        "sha256": "b9b4a05b51d49a87bef2fb6606d5e189d20489f279802cdb8263ea9e5bde0cd0",
+        "first": "2020-03-01",
+        "last": "2020-10-31",
+        "season": 2020,
+        "source": "OSI SAF OSI-450-a v3.0 (Sea Ice Concentration Climate Data Record v3) daily sea-ice concentration, 25 km",
+        "provenance": "seasonal-analogue/PROVENANCE-seasonal-analogue.json"
+      },
+      {
+        "path": "seasonal-analogue/sea-ice/processed/sea_ice_25km_offseason_2021_mar_oct.nc",
+        "sha256": "9680eb75c3075a592ab6f189872f869a70de3723da9b30e4bf5e9f0268f06ef9",
+        "first": "2021-03-01",
+        "last": "2021-10-31",
+        "season": 2021,
+        "source": "OSI SAF OSI-430-a v3.0 (Interim Sea Ice Concentration Climate Data Record v3) daily sea-ice concentration, 25 km",
+        "provenance": "seasonal-analogue/PROVENANCE-seasonal-analogue.json"
+      },
+      {
+        "path": "seasonal-analogue/sea-ice/processed/sea_ice_25km_offseason_2022_mar_oct.nc",
+        "sha256": "d85e7dfcf13f4976dac27a068bd07e5a148ef9ddf5a7a5f2b131b1c47ccd6801",
+        "first": "2022-03-01",
+        "last": "2022-10-31",
+        "season": 2022,
+        "source": "OSI SAF OSI-430-a v3.0 (Interim Sea Ice Concentration Climate Data Record v3) daily sea-ice concentration, 25 km",
+        "provenance": "seasonal-analogue/PROVENANCE-seasonal-analogue.json"
+      },
+      {
+        "path": "seasonal-analogue/sea-ice/processed/sea_ice_25km_offseason_2023_mar_oct.nc",
+        "sha256": "acfba6862068b65a9644c85cecd1a30b1c8d818fb8c6ba4af4b1e3c576b8f61d",
+        "first": "2023-03-01",
+        "last": "2023-10-31",
+        "season": 2023,
+        "source": "OSI SAF OSI-430-a v3.0 (Interim Sea Ice Concentration Climate Data Record v3) daily sea-ice concentration, 25 km",
+        "provenance": "seasonal-analogue/PROVENANCE-seasonal-analogue.json"
+      },
+      {
+        "path": "seasonal-analogue/sea-ice/processed/sea_ice_25km_offseason_2024_mar_oct.nc",
+        "sha256": "853d270f43d37ce87a04d8574ff538d1e6f34db9a10552408297d69bb7713231",
+        "first": "2024-03-01",
+        "last": "2024-10-31",
+        "season": 2024,
+        "source": "OSI SAF OSI-430-a v3.0 (Interim Sea Ice Concentration Climate Data Record v3) daily sea-ice concentration, 25 km",
+        "provenance": "seasonal-analogue/PROVENANCE-seasonal-analogue.json"
+      }
+    ],
+    "analogue_wind_forcing": [
+      {
+        "path": "seasonal-analogue/forcing/processed/forcing_era5_daily_25km_20240301_20240430.nc",
+        "sha256": "fb501cbe865ca296536cac3e5473d1161b0420e1b0396a63ad6e7ac728dc22e7",
+        "first": "2024-03-01",
+        "last": "2024-04-30"
+      },
+      {
+        "path": "seasonal-analogue/forcing/processed/forcing_era5_daily_25km_20240501_20240630.nc",
+        "sha256": "2d487d1a24674f4e8a06b73a3d5394aa332b9713b72093961c7e83d1cc833b92",
+        "first": "2024-05-01",
+        "last": "2024-06-30"
+      },
+      {
+        "path": "seasonal-analogue/forcing/processed/forcing_era5_daily_25km_20240701_20240831.nc",
+        "sha256": "28bb2241369ae8af71e683d23e3c67da2db150b4b70f73525a289525d8b72685",
+        "first": "2024-07-01",
+        "last": "2024-08-31"
+      },
+      {
+        "path": "seasonal-analogue/forcing/processed/forcing_era5_daily_25km_20240901_20241031.nc",
+        "sha256": "276610e72bfd36e2b18461641b073ed967a6e1d00d6ce87a3cdf82c542d7f755",
+        "first": "2024-09-01",
+        "last": "2024-10-31"
+      }
+    ],
+    "analogue_current_forcing": [
+      {
+        "path": "seasonal-analogue/forcing/processed/forcing_cmems_daily_25km_20240301-20241031.nc",
+        "sha256": "b25f7d28d9b5038de700bf6fba07b0332ed1cd4788b6b8e1cd154e8cd55ef720",
+        "first": "2024-03-01",
+        "last": "2024-10-31"
+      }
+    ],
+    "analogue_icebergs": [
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20240301.csv",
+        "sha256": "383e36e2e5a1e1b519ec05711e738bf12375224bd9111a6759e6560bd3a0d6b5",
+        "date": "2024-03-01"
+      },
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20240307.csv",
+        "sha256": "21a5b5e0005aa22fd83fafba1c2a883276c8eb5f5c05c729096f1a9a9b1588fc",
+        "date": "2024-03-07"
+      },
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20240315.csv",
+        "sha256": "bd6ee0c6115a8e88cd374bc6b833684c97edbc70f44ddca328c14e8b1c3fc8de",
+        "date": "2024-03-15"
+      },
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20240322.csv",
+        "sha256": "d928b6208306cd1de0339195bde36c3ac37935175309963c32179388357f8df3",
+        "date": "2024-03-22"
+      },
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20240329.csv",
+        "sha256": "0712d627b0f11ecc575ad80ffb827ee9bd4167dc7c7cd5b9d165b6347e8ebb97",
+        "date": "2024-03-29"
+      },
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20240405.csv",
+        "sha256": "81f3cb1fa8183eec10900ed9cc5b7682b1f284c84a30835439fa0911ac674614",
+        "date": "2024-04-05"
+      },
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20240412.csv",
+        "sha256": "ae7fad3be8844ce4ac0f442804eeb08f14c7349f53860d170f4db1ae89a944de",
+        "date": "2024-04-12"
+      },
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20240419.csv",
+        "sha256": "7c36216f2b7092c0d8a45bf9cf41227a3a54af3703c9a6d04544979afb036c58",
+        "date": "2024-04-19"
+      },
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20240426.csv",
+        "sha256": "1b3170b3a95830025aa95848c4d9da6852801bcfe833e63e4b58aec343983723",
+        "date": "2024-04-26"
+      },
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20240502.csv",
+        "sha256": "ca563d1ff7a7cb0c0389fc50804872af2c22a4c60f9346fdc48ecfa74ce02de0",
+        "date": "2024-05-02"
+      },
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20240509.csv",
+        "sha256": "d70e796bd478902ee4c6cdc3fa67ceca85222d9510eabe88e4c91e4cd8b83375",
+        "date": "2024-05-09"
+      },
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20240517.csv",
+        "sha256": "0e36bf8557af70cc0fb357224db3cd3c6e8fe8e227971b78bb9d5d36c097b575",
+        "date": "2024-05-17"
+      },
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20240524.csv",
+        "sha256": "f8710cd97ca5638051f70d534a20740a588c5b94341d656450c940068571740f",
+        "date": "2024-05-24"
+      },
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20240531.csv",
+        "sha256": "b72a8211e6b8911638eb0ac1264508fefe9a086dfb61ca1288dca5fa4c07964a",
+        "date": "2024-05-31"
+      },
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20240607.csv",
+        "sha256": "9b5a36c6605cb73a3e2c9f8ed26335739c5aa3d2e0a48f926388191b6f56b4c7",
+        "date": "2024-06-07"
+      },
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20240614.csv",
+        "sha256": "2b788ecf8f697c436916df0c280d9759c287e2cbeb05661697c61492498ac247",
+        "date": "2024-06-14"
+      },
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20240621.csv",
+        "sha256": "11725430db3155c2f3e26a138dec520510ec0d9e9e6472fbfacacd5bbaecd389",
+        "date": "2024-06-21"
+      },
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20240627.csv",
+        "sha256": "c512faead29abe1ea6be77084be4e539c11c4251a1918bd4d69615deef9350ad",
+        "date": "2024-06-27"
+      },
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20240705.csv",
+        "sha256": "d3ae8698e161a7ad6c0ec46d4f28f46d4ccaaedda1264b532b405c997b6fe483",
+        "date": "2024-07-05"
+      },
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20240712.csv",
+        "sha256": "88161f694c982b2f89dfad932ab774580ec65229bcac6f2ff7e7958cc34ffcb9",
+        "date": "2024-07-12"
+      },
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20240719.csv",
+        "sha256": "be797fddb7ae1f5ba3dda63efd1158889aa0bf4e8a4a4cbbd6d6dc125ffe0c5f",
+        "date": "2024-07-19"
+      },
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20240725.csv",
+        "sha256": "8edb951f057d7dfc47d77349dc824420db036821b8b600cd4c3174a9ad9c6712",
+        "date": "2024-07-25"
+      },
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20240802.csv",
+        "sha256": "654cde83f3c464a7bcd95f72f6c93a8ce2bd1ad46fa227472807b3b42b897e6a",
+        "date": "2024-08-02"
+      },
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20240808.csv",
+        "sha256": "55370092ddac9204c2cd38bf3c039d96f389a1308fa5317df4555d68d6cc709e",
+        "date": "2024-08-08"
+      },
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20240815.csv",
+        "sha256": "04bd1e18620067d4b52af27931c2d3624b262e22732a916a0850b50bdfc161fa",
+        "date": "2024-08-15"
+      },
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20240822.csv",
+        "sha256": "f05f559a8a6ad1e394ffd7d6d616d7bb65f498e766c2ab18e0fd50b16ce165f4",
+        "date": "2024-08-22"
+      },
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20240829.csv",
+        "sha256": "e8d3f840e1a031ee9e8244fe1142468ce34e883c634ddace2218fd1909551e9f",
+        "date": "2024-08-29"
+      },
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20240906.csv",
+        "sha256": "a469d80d81303b7dc03b5f5faea68be12a12eb8c21badbe360733d86d3ffadf7",
+        "date": "2024-09-06"
+      },
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20240913.csv",
+        "sha256": "138eacf710a866374a3c78290e7f3cbaafc7469a7cd9bb3a9f9023b1564fbeb6",
+        "date": "2024-09-13"
+      },
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20240920.csv",
+        "sha256": "cb625f97f457d91b1795266b6138a10ab4aed211b2afed334f269bfa5c9832dd",
+        "date": "2024-09-20"
+      },
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20240926.csv",
+        "sha256": "a5d418433b2f54bc1275190f4193a459fda2f81860dbbe4fe0b7863d8f8b10e9",
+        "date": "2024-09-26"
+      },
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20241004.csv",
+        "sha256": "d969b24191b054d8a28909b6b6c3451770efcd71111bc8b85f1e9ffe8ea17b93",
+        "date": "2024-10-04"
+      },
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20241010.csv",
+        "sha256": "2c7eb304fe719527c5cefb7ec8fc834b58f0f0a3bfc202215abe8b20cd4689bf",
+        "date": "2024-10-10"
+      },
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20241018.csv",
+        "sha256": "051967de333ef74710058932f965ac67e7a1a6fbd29916aa9178a409abefc79d",
+        "date": "2024-10-18"
+      },
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20241025.csv",
+        "sha256": "616c67278242175e6666b319b7deddf52f55ed2c912297c5f54242a5a1669f79",
+        "date": "2024-10-25"
+      },
+      {
+        "path": "seasonal-analogue/icebergs/raw/AntarcticIcebergs_20241031.csv",
+        "sha256": "e75814aae72a4d212f4c2976643b5144c8ecbdd231f13aa54f20a47f3110d7b8",
+        "date": "2024-10-31"
+      }
     ]
   },
   "splits": {
@@ -852,5 +1142,14 @@
     "usnic_max_age_days": 120,
     "disclosure": "Forecast estimate: future-year Antarctic observations/forcing are not fully available in this demo runtime. Results use the latest available real seasonal data and explicitly labelled proxy/estimated forcing where required. This is a research/hackathon estimate, not a certified navigation route.",
     "method": "Dates after the real archive are planned with the unchanged real-data engine from an analogue start: the same calendar day in the latest archive season that covers the run. Sea ice: that day's real OSI SAF observations (proxy starting state, not an observation of the requested year) forecast with the frozen U-Net. Winds and currents: ERA5/CMEMS reanalysis of the analogue days (proxy forcing, not a forecast). Icebergs: the latest official USNIC list on or before the requested date, positions held from the list date, then drifted with the calibrated ensemble. Engine dates map one-to-one onto the requested dates by a fixed day offset."
+  },
+  "seasonal_analogue": {
+    "label": "Historical seasonal analogue",
+    "member_years": 7,
+    "max_shift_days": 7,
+    "recent_iceberg_max_age_days": 120,
+    "sea_ice_from": "2016-11-01",
+    "disclosure": "Forecast / hackathon estimate from a historical seasonal analogue: no forecast exists for this date. Sea ice is the real observed ice of the same calendar days in earlier years, winds and currents are the ERA5/CMEMS reanalysis of the analogue date, and icebergs are the latest official USNIC list (or the analogue year's list when none is recent). This shows what those years would have meant for this route; it is not a meteorological or oceanographic forecast and not a certified navigation route.",
+    "method": "Dates after the real archive that the forecast pathway cannot serve are estimated without any model: the analogue date is the requested calendar day in the most recent earlier year with real sea ice, winds and currents for the whole run. Each sea-ice scenario is the real OSI SAF observation of the same calendar days in one of up to 7 earlier years (the analogue year itself excluded), shifted by -7..+7 days; winds and currents are the analogue date's ERA5/CMEMS reanalysis; icebergs are the latest official USNIC list when it is at most 120 days old (held, then drifted), else the official list of the analogue date (drifted). Engine dates map one-to-one onto the requested dates by a fixed day offset."
   }
 }

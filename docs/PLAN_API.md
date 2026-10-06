@@ -70,7 +70,7 @@ Each entry has:
 |---|---|---|
 | 422 | `invalid_location` | Unknown preset; outside the grid; inland beyond 60 km of navigable water; origin = destination cell; a route longer than the 21-day model horizon |
 | 422 | `out_of_coverage` | The issue date is not in the archive or off season; less than 14 days of in-season history; window + horizon run past the season; missing ERA5 or CMEMS days; no USNIC list ≤ 14 days old |
-| 422 | `forecast_unavailable` | An in-season date after the archive that forecast mode cannot plan (no analogue season, or no official iceberg list within 120 days) |
+| 422 | `forecast_unavailable` | A date after the archive that neither the proxy forecast nor a historical seasonal analogue can serve (e.g. the off-season data are missing); both reasons are given |
 | 422 | (validation) | Missing fields, or `window_days` outside 1..14 |
 | 503 | `unavailable` / `blocked` / `failed` | No archive configured; inputs missing or changed (checksums); model or PyTorch unavailable |
 
@@ -80,4 +80,4 @@ One request builds one scenario set (about 10–15 s on the real archive after t
 
 ## Dates after the archive (forecast mode)
 
-A date after the real archive (e.g. `"issue": "2026-11-19"`) returns the same response shape with `metadata.mode: "forecast"`, `execution_mode: "modelled"`, `data_status: "forecast_estimate"`, forecast banners and disclosure, and `metadata.forecast` listing every proxy input and the dates actually used. See [FORECAST_MODE.md](FORECAST_MODE.md).
+Any date after the real archive (e.g. `"issue": "2026-11-19"`, `"2027-08-14"` or `"2030-08-14"`) returns the same response shape with `metadata.mode: "forecast"`, `execution_mode: "modelled"`, `data_status: "forecast_estimate"`, forecast banners and disclosure, and `metadata.forecast` listing every proxy input and the dates actually used. `metadata.forecast.pathway` is `proxy_forecast` or `seasonal_analogue`; the analogue records `analogue_date`, the sea-ice member years and windows, and its `confidence`. See [FORECAST_MODE.md](FORECAST_MODE.md).
